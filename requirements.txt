@@ -5,3 +5,4 @@ pandas
 matplotlib
 japanize-matplotlib
 duckduckgo-search
+setuptools
