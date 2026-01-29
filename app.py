@@ -15,7 +15,13 @@ mpl.rcParams['font.family'] = 'IPAexGothic'
 
 # --- サイドバー：設定 ---
 st.sidebar.title("🛠 設定パネル")
-api_key = st.sidebar.text_input("Gemini APIキー", type="password")
+
+# APIキーの自動読み込み設定
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    st.sidebar.success("APIキー認証済み")
+else:
+    api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 st.sidebar.markdown("---")
 st.sidebar.markdown("Created by Deep Dive Investing Project")
 
