@@ -6,3 +6,4 @@ matplotlib
 japanize-matplotlib
 duckduckgo-search
 setuptools
+plotly
