@@ -37,8 +37,7 @@ if 'screener_codes' not in st.session_state: st.session_state['screener_codes'] 
 
 # --- サイドバー ---
 st.sidebar.title("🦅 Deep Dive Pro")
-# モードに「ダッシュボード」を追加
-mode = st.sidebar.radio("モード選択", ["🏠 市場ダッシュボード", "🔍 個別詳細分析", "💎 お宝発掘 (一括採点)"])
+mode = st.sidebar.radio("モード選択", ["🏠 市場ダッシュボード", "💎 お宝発掘 (一括採点)", "🔍 個別詳細分析"])
 
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -47,7 +46,7 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 12.0: Market Dashboard")
+st.sidebar.info("Ver 12.1: Force 1.5 Flash")
 
 # 個別分析用設定
 if mode == "🔍 個別詳細分析":
@@ -74,12 +73,15 @@ if mode == "🔍 個別詳細分析":
 def get_model(key):
     try:
         genai.configure(api_key=key)
-        models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        target = "models/gemini-1.5-flash"
-        if not any(m.name == target for m in models):
-             target = next((m.name for m in models if 'flash' in m.name), "models/gemini-pro")
-        return genai.GenerativeModel(target)
-    except: return None
+        # 【重要修正】2.5などの最新版を避け、安定版の1.5を強制的に指定する
+        # 自動検索をやめて、名前決め打ちで指定
+        return genai.GenerativeModel("models/gemini-1.5-flash")
+    except:
+        # 万が一だめならProを試す
+        try:
+            return genai.GenerativeModel("models/gemini-1.5-pro")
+        except:
+            return None
 
 def safe_get(info, keys, default=None):
     for k in keys:
@@ -190,163 +192,108 @@ def get_news(code, name):
     return txt if txt else "直近の重要ニュースなし"
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 12.0)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 12.1)")
 
 # ==========================================
-# モード0: 🏠 市場ダッシュボード (NEW!)
+# モード0: 🏠 市場ダッシュボード
 # ==========================================
 if mode == "🏠 市場ダッシュボード":
     st.header("📈 Market Dashboard")
-    
-    # 1. 市場概況 (日経平均・ドル円)
-    # yfinanceで ^N225, JPY=X を取得
     col_m1, col_m2, col_m3 = st.columns(3)
-    
-    with st.spinner("市場データを取得中..."):
+    with st.spinner("市場データ取得中..."):
         try:
-            # 日経平均
             nk = yf.Ticker("^N225").history(period="2d")
             if not nk.empty:
-                nk_price = nk['Close'].iloc[-1]
-                nk_diff = nk_price - nk['Close'].iloc[-2]
-                col_m1.metric("🇯🇵 日経平均", f"{nk_price:,.0f}", f"{nk_diff:+.0f}")
-            
-            # ドル円
-            usdjpy = yf.Ticker("JPY=X").history(period="2d")
-            if not usdjpy.empty:
-                uj_price = usdjpy['Close'].iloc[-1]
-                uj_diff = uj_price - usdjpy['Close'].iloc[-2]
-                col_m2.metric("🇺🇸/🇯🇵 ドル円", f"{uj_price:.2f}", f"{uj_diff:+.2f}")
-                
-            col_m3.info(f"現在日時: {get_current_time_jst().strftime('%Y-%m-%d %H:%M')}")
-        except:
-            st.error("市場データの取得に失敗しました")
-
+                p = nk['Close'].iloc[-1]; d = p - nk['Close'].iloc[-2]
+                col_m1.metric("🇯🇵 日経平均", f"{p:,.0f}", f"{d:+.0f}")
+            uj = yf.Ticker("JPY=X").history(period="2d")
+            if not uj.empty:
+                p = uj['Close'].iloc[-1]; d = p - uj['Close'].iloc[-2]
+                col_m2.metric("🇺🇸/🇯🇵 ドル円", f"{p:.2f}", f"{d:+.2f}")
+            col_m3.info(f"現在: {get_current_time_jst().strftime('%m/%d %H:%M')}")
+        except: st.error("市場データ取得失敗")
     st.divider()
-
-    # 2. 注目銘柄ランキング (履歴から)
-    st.subheader("🏆 あなたの監視銘柄 Top Picks")
+    st.subheader("🏆 あなたの監視銘柄")
     history = st.session_state['history']
     if history:
-        # スコア順にソートしてTop5を表示
-        ranked_items = []
-        for code, data in history.items():
-            # 成長 + 割安 の合計スコアで簡易ランク付け
-            total_score = data.get('oneil', 0) + data.get('graham', 0)
-            ranked_items.append({
-                'code': code,
-                'name': data['name'],
-                'price': data['price'],
-                'score': total_score,
-                'oneil': data.get('oneil', 0),
-                'graham': data.get('graham', 0),
-                'date': data.get('timestamp', '-')
-            })
-        
-        # ソート
-        ranked_items.sort(key=lambda x: x['score'], reverse=True)
-        
-        # カード表示
-        for item in ranked_items[:3]: # Top 3
+        ranked = []
+        for c, d in history.items():
+            s = d.get('oneil', 0) + d.get('graham', 0)
+            ranked.append({'c': c, 'n': d['name'], 'p': d['price'], 's': s})
+        ranked.sort(key=lambda x: x['s'], reverse=True)
+        for item in ranked[:3]:
             with st.container(border=True):
-                c_head, c_body, c_act = st.columns([2, 3, 1])
-                c_head.markdown(f"### {item['name']}")
-                c_head.caption(f"Code: {item['code']}")
-                
-                c_body.metric("総合スコア", f"{item['score']}点", f"株価: {item['price']:,.0f}円")
-                c_body.progress(min(item['score'], 200) / 200) # バー表示
-                
-                if c_act.button("詳細分析", key=f"dash_{item['code']}"):
-                    st.session_state['target_code'] = item['code']
-                    # モードを強制的に切り替えるハックはないが、Rerunで個別画面に誘導する工夫
-                    # (今回はシンプルにtarget_codeセットして、ユーザーにタブ切り替えを促すメッセージを出す)
-                    st.success(f"セット完了！サイドバーから「🔍 個別詳細分析」を選んでください。")
-
-    else:
-        st.info("まだ履歴がありません。「個別詳細分析」や「お宝発掘」で銘柄を探してみましょう！")
+                c1, c2, c3 = st.columns([2, 3, 1])
+                c1.markdown(f"### {item['n']}")
+                c1.caption(f"Code: {item['c']}")
+                c2.metric("総合スコア", f"{item['s']}点", f"¥{item['p']:,.0f}")
+                c2.progress(min(item['s'], 200)/200)
+                if c3.button("詳細", key=f"d_{item['c']}"):
+                    st.session_state['target_code'] = item['c']
+                    st.success("個別詳細分析へ移動してください")
+    else: st.info("履歴がありません")
 
 # ==========================================
 # モード1: 💎 お宝発掘
 # ==========================================
 elif mode == "💎 お宝発掘 (一括採点)":
     st.header("💎 お宝銘柄ハンター")
-    st.markdown("複数の銘柄を一括分析し、**スコア80点以上**の有望株を発掘します。")
+    st.info("💡 AIを使わないため、制限に関係なく動作します")
     
-    def set_preset(codes):
-        st.session_state['screener_codes'] = codes
+    def set_preset(codes): st.session_state['screener_codes'] = codes
 
-    col_p1, col_p2, col_p3 = st.columns(3)
-    if col_p1.button("🇯🇵 日経・人気"):
-        set_preset("7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432")
-    if col_p2.button("💰 高配当・割安"):
-        set_preset("8306, 8316, 2914, 8058, 8001, 8002, 9433, 9434, 4503, 5401")
-    if col_p3.button("🚀 半導体・ハイテク"):
-        set_preset("8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("🇯🇵 日経・人気"): set_preset("7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432")
+    if c2.button("💰 高配当"): set_preset("8306, 8316, 2914, 8058, 8001, 8002, 9433, 9434, 4503, 5401")
+    if c3.button("🚀 半導体"): set_preset("8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752")
 
-    with st.form("screener_form"):
-        input_codes_str = st.text_area("銘柄コードを入力 (カンマ区切り)", key="screener_codes")
-        scan_btn = st.form_submit_button("🛡️ 一括スキャン開始", type="primary")
+    with st.form("screener"):
+        codes_str = st.text_area("銘柄コード (カンマ区切り)", key="screener_codes")
+        btn = st.form_submit_button("🛡️ スキャン開始", type="primary")
     
-    if scan_btn:
-        codes = [c.strip() for c in input_codes_str.replace("、", ",").split(",") if c.strip()]
-        if not codes:
-            st.warning("コードを入力してください")
+    if btn:
+        codes = [c.strip() for c in codes_str.replace("、", ",").split(",") if c.strip()]
+        if not codes: st.warning("コードを入力してください")
         else:
-            results = []
-            progress = st.progress(0)
-            status_text = st.empty()
-            
+            res = []
+            prog = st.progress(0)
+            txt = st.empty()
             for i, c in enumerate(codes):
-                status_text.text(f"分析中... {c}")
+                txt.text(f"分析中... {c}")
                 try:
                     if re.match(r'\d{4}', c):
-                        tk = yf.Ticker(f"{c}.T")
-                        hist = tk.history(period="1y")
+                        tk = yf.Ticker(f"{c}.T"); hist = tk.history(period="1y")
                         if not hist.empty:
                             info = tk.info
-                            o_score, g_score, rsi = calculate_scores(hist, info)
-                            hist, cross, kumo = calculate_technicals(hist)
-                            name = info.get('longName', c)
-                            price = hist['Close'].iloc[-1]
-                            
-                            judge = ""
-                            if o_score >= 80: judge += "🏆成長 "
-                            if g_score >= 80: judge += "💎割安 "
-                            
-                            results.append({
-                                "コード": c, "銘柄名": name, "株価": f"{price:,.0f}円",
-                                "成長(オニール)": o_score, "割安(グレアム)": g_score,
-                                "RSI": round(rsi, 1), "MA判定": cross, "一目": kumo, "有望度": judge
+                            os, gs, rsi = calculate_scores(hist, info)
+                            hist, cr, km = calculate_technicals(hist)
+                            j = ""
+                            if os >= 80: j += "🏆成長 "
+                            if gs >= 80: j += "💎割安 "
+                            res.append({
+                                "コード": c, "銘柄名": info.get('longName',c), "株価": f"{hist['Close'].iloc[-1]:,.0f}円",
+                                "成長": os, "割安": gs, "RSI": round(rsi,1), "判定": cr, "有望度": j
                             })
-                    time.sleep(0.5) 
-                    progress.progress((i + 1) / len(codes))
+                    time.sleep(0.5)
+                    prog.progress((i+1)/len(codes))
                 except: pass
-            
-            status_text.empty(); progress.empty()
-            
-            if results:
-                df = pd.DataFrame(results)
-                df = df.sort_values(by=["成長(オニール)", "割安(グレアム)"], ascending=False)
-                def highlight_high_score(s):
-                    is_high = s >= 80
-                    return ['background-color: #2e4a33; color: white; font-weight: bold;' if v else '' for v in is_high]
-
-                st.success(f"{len(results)}銘柄の分析が完了しました！")
-                st.dataframe(df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]), use_container_width=True, height=500)
-            else: st.error("有効なデータなし")
-
+            txt.empty(); prog.empty()
+            if res:
+                df = pd.DataFrame(res).sort_values(by=["成長", "割安"], ascending=False)
+                def hl(s): return ['background-color: #2e4a33' if v >= 80 else '' for v in s]
+                st.dataframe(df.style.apply(hl, subset=["成長", "割安"]), use_container_width=True)
+            else: st.error("データなし")
 
 # ==========================================
 # モード2: 🔍 個別詳細分析
 # ==========================================
 elif mode == "🔍 個別詳細分析":
     with st.form('search'):
-        q = st.text_input("銘柄コード/名", placeholder="例: 6758 (エンターで実行)")
-        submitted = st.form_submit_button("🔍 分析開始", type="primary")
+        q = st.text_input("銘柄コード/名", placeholder="例: 6758")
+        sub = st.form_submit_button("🔍 分析開始", type="primary")
 
-    if submitted:
+    if sub:
         if not api_key: st.error("APIキーが必要です"); st.stop()
-        if not q: st.warning("入力を確認してください"); st.stop()
         tgt = None
         if re.fullmatch(r'\d{4}', q.strip()): tgt = q.strip()
         else:
@@ -363,101 +310,88 @@ elif mode == "🔍 個別詳細分析":
 
     if st.session_state['target_code']:
         code = st.session_state['target_code']
-        model = get_model(api_key)
+        model = get_model(api_key) # ここで1.5-flashが呼ばれる
         now_str = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
         
         with st.spinner(f"コード【{code}】を分析中..."):
             try:
-                tk = yf.Ticker(f"{code}.T")
-                hist = tk.history(period="2y")
-                info = tk.info
+                tk = yf.Ticker(f"{code}.T"); hist = tk.history(period="2y"); info = tk.info
                 if hist.empty: st.error("データ取得失敗"); st.stop()
                 
                 hist, cross, kumo = calculate_technicals(hist)
                 oneil, graham, rsi = calculate_scores(hist, info)
-                latest = hist.iloc[-1]
-                price = latest['Close']
+                price = hist['Close'].iloc[-1]
                 chg = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
                 name = info.get('longName', code)
                 
                 st.sidebar.subheader("🏢 企業情報")
-                sector = safe_get(info, ['sector'], '不明')
-                st.sidebar.write(f"**業種**: {sector}")
-                website = safe_get(info, ['website'])
-                if website: st.sidebar.link_button("🌐 公式サイトを見る", website)
+                st.sidebar.write(f"業種: {safe_get(info, ['sector'], '-')}")
+                url = safe_get(info, ['website'])
+                if url: st.sidebar.link_button("公式HP", url)
 
-                st.session_state['history'][code] = {
-                    'name': name, 'timestamp': now_str, 'price': price, 'oneil': oneil, 'graham': graham
-                }
+                st.session_state['history'][code] = {'name': name, 'timestamp': now_str, 'price': price, 'oneil': oneil, 'graham': graham}
                 save_history(st.session_state['history'])
                 
                 st.header(f"{name} ({code})")
                 
-                tab1, tab2, tab3 = st.tabs(["📝 分析レポート", "📈 詳細チャート", "📊 業績・財務"])
+                t1, t2, t3 = st.tabs(["📝 レポート", "📈 チャート", "📊 財務"])
                 
-                with tab1:
+                with t1:
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("株価", f"{price:,.0f}円", f"{chg:+.2f}%")
                     c2.metric("RSI", f"{rsi:.1f}")
                     c3.metric("成長スコア", f"{oneil}点")
                     c4.metric("割安スコア", f"{graham}点")
                     
-                    st.subheader("🤖 AIアナリストの見解")
+                    st.subheader("🤖 AI分析")
                     try:
                         news = get_news(code, name)
                         prompt = f"""
-                        あなたはプロの機関投資家。現在日時「{now_str}」。
+                        あなたはプロ投資家。日時「{now_str}」。
                         銘柄: {name} ({code}), 株価: {price}円
                         ニュース: {news}
                         スコア: 成長{oneil}, 割安{graham}
-                        指示: 最新決算（あれば）の評価、スコア背景、売買戦略を簡潔かつ具体的に。
+                        指示: 決算評価、スコア背景、売買戦略。
                         """
                         if model:
                             try:
                                 resp = model.generate_content(prompt)
                                 st.markdown(resp.text)
                             except Exception as e:
-                                st.warning("⚠️ AIは休憩中ですが、他のデータは正常です！")
-                                st.error(f"API制限: {e}")
-                        else: st.warning("AI接続不可")
-                    except Exception as e: st.error(f"News Error: {e}")
+                                st.warning("⚠️ AI混雑中ですが、チャート等は正常です")
+                                st.error(f"詳細: {e}")
+                        else: st.warning("モデル接続不可")
+                    except: st.error("ニュース取得エラー")
 
-                with tab2:
-                    st.info(f"テクニカル判定: {cross} / {kumo}")
-                    d_hist = hist.tail(150)
+                with t2:
+                    st.info(f"{cross} / {kumo}")
+                    dh = hist.tail(150)
                     fig = go.Figure()
                     if show_ichimoku:
-                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0,200,200,0.2)'))
+                        fig.add_trace(go.Scatter(x=dh.index, y=dh['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig.add_trace(go.Scatter(x=dh.index, y=dh['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0,200,200,0.2)'))
                     if show_bollinger:
-                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['Upper'], line=dict(width=1, color='gray', dash='dot'), name='+2σ'))
-                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['Lower'], line=dict(width=1, color='gray', dash='dot'), name='-2σ', fill='tonexty', fillcolor='rgba(128,128,128,0.1)'))
-
-                    fig.add_trace(go.Candlestick(x=d_hist.index, open=d_hist['Open'], high=d_hist['High'], low=d_hist['Low'], close=d_hist['Close'], name='株価'))
-                    fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA25'], line=dict(color='orange'), name='25MA'))
-                    fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA75'], line=dict(color='skyblue'), name='75MA'))
-                    fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_dark")
+                        fig.add_trace(go.Scatter(x=dh.index, y=dh['Upper'], line=dict(width=1, color='gray', dash='dot'), name='+2σ'))
+                        fig.add_trace(go.Scatter(x=dh.index, y=dh['Lower'], line=dict(width=1, color='gray', dash='dot'), name='-2σ'))
+                    fig.add_trace(go.Candlestick(x=dh.index, open=dh['Open'], high=dh['High'], low=dh['Low'], close=dh['Close'], name='株価'))
+                    fig.add_trace(go.Scatter(x=dh.index, y=dh['SMA25'], line=dict(color='orange'), name='25MA'))
+                    fig.add_trace(go.Scatter(x=dh.index, y=dh['SMA75'], line=dict(color='skyblue'), name='75MA'))
+                    fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
                     st.plotly_chart(fig, use_container_width=True)
 
-                with tab3:
-                    st.subheader("💰 業績データ")
+                with t3:
                     try:
                         fin = tk.financials
                         if fin is not None and not fin.empty:
-                            fin = fin.T.sort_index()
-                            fin_recent = fin.tail(4)
-                            fig_fin = go.Figure()
-                            if 'Total Revenue' in fin.columns:
-                                fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Total Revenue'], name='売上高', marker_color='#4ecdc4'))
-                            elif 'Revenue' in fin.columns:
-                                 fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Revenue'], name='売上高', marker_color='#4ecdc4'))
-                            if 'Net Income' in fin.columns:
-                                fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Net Income'], name='純利益', marker_color='#ff6b6b'))
-                            fig_fin.update_layout(title="売上高と純利益 (年次)", barmode='group', template="plotly_dark", height=400)
-                            st.plotly_chart(fig_fin, use_container_width=True)
-                            
+                            fin = fin.T.sort_index().tail(4)
+                            figf = go.Figure()
+                            if 'Total Revenue' in fin.columns: figf.add_trace(go.Bar(x=fin.index, y=fin['Total Revenue'], name='売上'))
+                            if 'Net Income' in fin.columns: figf.add_trace(go.Bar(x=fin.index, y=fin['Net Income'], name='利益'))
+                            figf.update_layout(title="業績推移", template="plotly_dark", height=400)
+                            st.plotly_chart(figf, use_container_width=True)
                             csv = hist.to_csv().encode('utf-8')
-                            st.download_button(label="📥 株価CSVダウンロード", data=csv, file_name=f"{code}_data.csv", mime='text/csv')
+                            st.download_button("CSV保存", csv, f"{code}.csv", "text/csv")
                         else: st.info("財務データなし")
-                    except Exception as e: st.error(f"Financial Error: {e}")
-            except Exception as e: st.error(f"データ取得エラー: {e}")
+                    except: st.error("財務エラー")
+
+            except: st.error("エラー発生")
