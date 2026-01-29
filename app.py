@@ -45,7 +45,7 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 7.1: Chart Fixed")
+st.sidebar.info("Ver 7.2: Robust Mode")
 
 # --- 履歴表示 ---
 st.sidebar.subheader("🕒 最近のチェック")
@@ -69,17 +69,12 @@ if history:
 def get_model(api_key):
     try:
         genai.configure(api_key=api_key)
-        # 利用可能なモデルを検索
         models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 優先順位: 1.5-flash -> 1.5-pro -> pro -> その他
         target_model = "models/gemini-1.5-flash"
         if not any(m.name == target_model for m in models):
              target_model = next((m.name for m in models if 'flash' in m.name), "models/gemini-pro")
-        
         return genai.GenerativeModel(target_model)
     except Exception as e:
-        st.sidebar.error(f"モデル接続エラー: {e}")
         return None
 
 def safe_get(info, keys, default=None):
@@ -92,7 +87,6 @@ def calculate_scores(hist, info):
     latest = hist.iloc[-1]
     price = latest['Close']
     
-    # --- 1. オニール式 ---
     oneil_score = 0
     high_52 = safe_get(info, ['fiftyTwoWeekHigh'])
     if high_52:
@@ -108,7 +102,6 @@ def calculate_scores(hist, info):
     sma25 = hist['Close'].rolling(25).mean().iloc[-1]
     if price > sma25: oneil_score += 30
     
-    # --- 2. グレアム式 ---
     graham_score = 0
     eps = safe_get(info, ['forwardEps', 'trailingEps'])
     if eps and eps > 0:
@@ -175,7 +168,6 @@ def calculate_technicals(hist):
 def get_news_deep_dive(code, name):
     ddgs = DDGS()
     news_text = ""
-    # 決算・適時開示を狙うクエリ
     queries = [
         f"{code} {name} 決算短信 発表 2026",
         f"{code} {name} 業績予想修正 速報"
@@ -191,11 +183,11 @@ def get_news_deep_dive(code, name):
         if len(news_text) > 300: break
 
     if not news_text:
-        return "直近24時間以内の重要ニュースは見当たりませんでした（15:30前の可能性あり）。"
+        return "直近24時間以内の重要ニュースは見当たりませんでした。"
     return news_text
 
 # --- UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 7.1)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 7.2)")
 query = st.text_input("銘柄コードまたは企業名", placeholder="例: 6702")
 
 if st.button("🔍 プロ分析開始", type="primary"):
@@ -214,6 +206,9 @@ if st.button("🔍 プロ分析開始", type="primary"):
                     match = re.search(r'\d{4}', resp.text)
                     if match: target_code = match.group(0)
                 except: pass
+            else:
+                # API制限時でも動くようにダミー検索を試みる等は省略
+                st.error("現在API制限中のため、銘柄名検索ができません。コード（数字）で直接入力してください。")
     
     if target_code:
         st.session_state['target_code'] = target_code
@@ -226,110 +221,100 @@ if st.session_state['target_code']:
     code = st.session_state['target_code']
     model = get_model(api_key)
     
-    with st.spinner(f"コード【{code}】の最新情報（15:30以降対応）を取得中..."):
+    # 【変更点】全体をtryで囲わず、各パートごとに安全に実行する
+    
+    # 1. データ取得と計算（ここはAPI制限関係なし）
+    with st.spinner(f"コード【{code}】のデータを分析中..."):
         try:
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="2y")
             info = ticker.info
             
             if hist.empty:
-                st.error("データ取得エラー")
-            else:
-                hist, cross_stat, kumo_stat = calculate_technicals(hist)
-                oneil, graham, rsi = calculate_scores(hist, info)
+                st.error("データ取得エラー：正しいコードか確認してください。")
+                st.stop()
                 
-                latest = hist.iloc[-1]
-                price = latest['Close']
-                change_pct = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
-                name = info.get('longName', code)
-                news = get_news_deep_dive(code, name)
-                
-                # 履歴保存
-                prev_data = st.session_state['history'].get(code, None)
-                current_data = {
-                    'name': name,
-                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    'price': price,
-                    'oneil': oneil,
-                    'graham': graham
-                }
-                st.session_state['history'][code] = current_data
-                save_history(st.session_state['history'])
+            hist, cross_stat, kumo_stat = calculate_technicals(hist)
+            oneil, graham, rsi = calculate_scores(hist, info)
+            
+            latest = hist.iloc[-1]
+            price = latest['Close']
+            change_pct = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
+            name = info.get('longName', code)
+            
+            # 履歴保存
+            current_data = {
+                'name': name, 'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                'price': price, 'oneil': oneil, 'graham': graham
+            }
+            st.session_state['history'][code] = current_data
+            save_history(st.session_state['history'])
+            
+            # --- 表示 ---
+            st.header(f"{name} ({code})")
+            
+            # 変化表示
+            prev_data = st.session_state['history'].get(code, {})
+            # (省略: 簡易表示)
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("現在値", f"{price:,.0f}円", f"{change_pct:+.2f}%")
+            c2.metric("RSI", f"{rsi:.1f}")
+            c3.metric("成長株スコア", f"{oneil}点")
+            c4.metric("割安株スコア", f"{graham}点")
+            
+            t1, t2 = st.columns(2)
+            t1.info(f"MA判定: **{cross_stat}**")
+            t2.info(f"一目判定: **{kumo_stat}**")
 
-                st.header(f"{name} ({code})")
-                
-                # 変化表示
-                if prev_data:
-                    st.info(f"🔄 **前回 ({prev_data['timestamp']}) からの変化:**")
-                    p_diff = price - prev_data['price']
-                    o_diff = oneil - prev_data['oneil']
-                    g_diff = graham - prev_data['graham']
-                    c_h1, c_h2, c_h3 = st.columns(3)
-                    c_h1.metric("株価変化", f"{p_diff:+.0f}円", delta_color="normal")
-                    c_h2.metric("成長スコア変化", f"{o_diff:+d}点")
-                    c_h3.metric("割安スコア変化", f"{g_diff:+d}点")
-                else:
-                    st.success("✨ 初めて分析する銘柄です。履歴に保存しました。")
-
-                st.divider()
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("現在値", f"{price:,.0f}円", f"{change_pct:+.2f}%")
-                c2.metric("RSI", f"{rsi:.1f}")
-                c3.metric("成長株スコア", f"{oneil}点")
-                c4.metric("割安株スコア", f"{graham}点")
-                
-                t1, t2 = st.columns(2)
-                t1.info(f"MA判定: **{cross_stat}**")
-                t2.info(f"一目判定: **{kumo_stat}**")
-
-                # --- チャート (修正: MAを復活) ---
-                st.subheader("📈 チャート")
-                display_hist = hist.tail(100)
-                fig = go.Figure()
-                
-                # 雲
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0, 200, 200, 0.2)'))
-                
-                # ローソク足
-                fig.add_trace(go.Candlestick(x=display_hist.index, open=display_hist['Open'], high=display_hist['High'], low=display_hist['Low'], close=display_hist['Close'], name="株価"))
-                
-                # 移動平均線 (復活!)
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1.5), name="25日線"))
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1.5), name="75日線"))
-                
-                fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-
-                # AIレポート
-                st.subheader("📝 決算 & AI分析")
-                prompt = f"""
-                あなたは機関投資家です。現在日時「{datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}」。
-                本日発表された「決算短信」や「業績修正」があれば、その数値を元に徹底的に分析してください。
-                
-                銘柄: {name} ({code})
-                株価: {price}円
-                ニュース: {news}
-                スコア: 成長{oneil}点, 割安{graham}点
-                
-                指示:
-                1. **決算速報 (最重要)**:
-                   ニュース欄を確認し、本日付の決算発表があれば内容（増益・減益など）を詳述。
-                2. **スコア分析**:
-                   {oneil}点、{graham}点というスコアの背景。
-                3. **売買戦略**:
-                   短期・中期の具体的なエントリー・損切りポイント。
-                """
-                
-                if model:
-                    try:
-                        resp = model.generate_content(prompt)
-                        st.markdown(resp.text)
-                    except Exception as e:
-                        # エラー内容を詳細に表示する
-                        st.error(f"AI生成エラー: {e}")
-                        st.error("※APIキーが無効、またはGoogle側の制限の可能性があります。")
+            # --- チャート表示 ---
+            st.subheader("📈 チャート")
+            display_hist = hist.tail(100)
+            fig = go.Figure()
+            # 雲
+            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0, 200, 200, 0.2)'))
+            # 株価
+            fig.add_trace(go.Candlestick(x=display_hist.index, open=display_hist['Open'], high=display_hist['High'], low=display_hist['Low'], close=display_hist['Close'], name="株価"))
+            # MA (移動平均線)
+            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1.5), name="25日線"))
+            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1.5), name="75日線"))
+            
+            fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
-            st.error(f"全体エラー: {e}")
+            st.error(f"データ表示エラー: {e}")
+            st.stop()
+
+    # 2. ニュースとAIレポート（ここだけAPI制限の影響を受ける）
+    st.divider()
+    st.subheader("📝 決算 & AI分析")
+    
+    try:
+        news = get_news_deep_dive(code, name)
+        
+        prompt = f"""
+        あなたは機関投資家です。現在日時「{datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}」。
+        本日発表された「決算短信」や「業績修正」があれば、その数値を元に徹底的に分析してください。
+        銘柄: {name} ({code})
+        株価: {price}円
+        ニュース: {news}
+        スコア: 成長{oneil}点, 割安{graham}点
+        指示: 決算速報、スコア分析、売買戦略を記述。
+        """
+        
+        if model:
+            try:
+                resp = model.generate_content(prompt)
+                st.markdown(resp.text)
+            except Exception as e:
+                # ここでエラーになってもチャートは消えない！
+                st.warning("⚠️ **AIは現在「休憩中（API制限）」ですが、上のチャートとスコアは最新です！**")
+                st.error(f"Google AIエラー: {e}")
+                st.write("※数分待ってから再読み込みすると、レポートも表示されます。")
+        else:
+             st.warning("AIモデルに接続できませんでした。APIキーを確認してください。")
+
+    except Exception as e:
+        st.error(f"ニュース取得エラー: {e}")
