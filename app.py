@@ -26,32 +26,26 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 5.2: Cloud Chart & Fixes")
+st.sidebar.info("Ver 5.3: Real-time Earnings")
 
 # --- 関数群 ---
 
 def get_model(api_key):
-    # 安全にモデルを探すロジック（エラー回避）
     try:
         genai.configure(api_key=api_key)
-        # 利用可能なモデル一覧を取得
         models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 1.5-flash を優先して探す
         model_name = "models/gemini-1.5-flash"
         if not any(m.name == model_name for m in models):
-             # 見つからなければ gemini-pro や最新版を探す
              model_name = next((m.name for m in models if 'flash' in m.name), "models/gemini-pro")
         return genai.GenerativeModel(model_name)
     except:
         return None
 
 def calculate_technicals(hist):
-    # 移動平均
     hist['SMA5'] = hist['Close'].rolling(window=5).mean()
     hist['SMA25'] = hist['Close'].rolling(window=25).mean()
     hist['SMA75'] = hist['Close'].rolling(window=75).mean()
     
-    # クロス判定（文字切れ対策のため短縮名も用意）
     latest = hist.iloc[-1]
     prev = hist.iloc[-2]
     
@@ -61,70 +55,76 @@ def calculate_technicals(hist):
     if pd.notna(prev['SMA5']) and pd.notna(prev['SMA25']):
         if prev['SMA5'] < prev['SMA25'] and latest['SMA5'] > latest['SMA25']:
             cross_status = "ゴールデンクロス"
-            cross_detail = "短期線(5日)が中期線(25日)を上抜けました（買いサイン）"
+            cross_detail = "短期線(5日)が中期線(25日)を上抜け (買いサイン)"
         elif prev['SMA25'] < prev['SMA75'] and latest['SMA25'] > latest['SMA75']:
             cross_status = "ゴールデンクロス"
-            cross_detail = "中期線(25日)が長期線(75日)を上抜けました（強い買いサイン）"
+            cross_detail = "中期線(25日)が長期線(75日)を上抜け (強い買いサイン)"
         elif prev['SMA5'] > prev['SMA25'] and latest['SMA5'] < latest['SMA25']:
             cross_status = "デッドクロス"
-            cross_detail = "短期線(5日)が中期線(25日)を下抜けました（売りサイン）"
+            cross_detail = "短期線(5日)が中期線(25日)を下抜け (売りサイン)"
         elif prev['SMA25'] > prev['SMA75'] and latest['SMA25'] < latest['SMA75']:
             cross_status = "デッドクロス"
-            cross_detail = "中期線(25日)が長期線(75日)を下抜けました（強い売りサイン）"
+            cross_detail = "中期線(25日)が長期線(75日)を下抜け (強い売りサイン)"
 
-    # 一目均衡表
     high9 = hist['High'].rolling(window=9).max()
     low9 = hist['Low'].rolling(window=9).min()
     hist['Tenkan'] = (high9 + low9) / 2
-
     high26 = hist['High'].rolling(window=26).max()
     low26 = hist['Low'].rolling(window=26).min()
     hist['Kijun'] = (high26 + low26) / 2
-
     hist['SpanA'] = ((hist['Tenkan'] + hist['Kijun']) / 2).shift(26)
     hist['SpanB'] = ((hist['High'].rolling(52).max() + hist['Low'].rolling(52).min()) / 2).shift(26)
     
-    # 雲の状態判定
     kumo_status = "雲の中"
-    kumo_detail = "株価は雲（抵抗帯）の中にあります"
-    
+    kumo_detail = "株価は雲の中にあります"
     current_price = latest['Close']
     span_a = hist['SpanA'].iloc[-1]
     span_b = hist['SpanB'].iloc[-1]
     
-    if pd.isna(span_a) or pd.isna(span_b):
-        kumo_status = "計算中"
-        kumo_detail = "データ不足のため判定できません"
-    elif current_price > max(span_a, span_b):
-        kumo_status = "雲上抜け"
-        kumo_detail = "株価が雲を上に抜けました（強気相場入り）"
-    elif current_price < min(span_a, span_b):
-        kumo_status = "雲下抜け"
-        kumo_detail = "株価が雲を下に抜けました（弱気相場入り）"
+    if pd.notna(span_a) and pd.notna(span_b):
+        if current_price > max(span_a, span_b):
+            kumo_status = "雲上抜け"
+            kumo_detail = "株価が雲を上に抜けました (強気入り)"
+        elif current_price < min(span_a, span_b):
+            kumo_status = "雲下抜け"
+            kumo_detail = "株価が雲を下に抜けました (弱気入り)"
 
     return hist, cross_status, cross_detail, kumo_status, kumo_detail
 
 def get_news_deep_dive(code, name):
     ddgs = DDGS()
     news_text = ""
+    
+    # 【戦略1】超速報：24時間以内の「決算短信・発表」を狙う
     try:
-        results = ddgs.text(f"{code} {name} 決算 コンセンサス 上方修正", region='jp-jp', timelimit='w', max_results=5)
+        # timelimit='d' (1日以内) で指定
+        results = ddgs.text(f"{code} {name} 決算短信 発表 結果", region='jp-jp', timelimit='d', max_results=5)
         if results:
-            news_text += "【決算・業績ニュース】\n"
+            news_text += "【🚨 HOT: 24時間以内の最新情報】\n"
             for r in results:
-                news_text += f"- {r['title']} ({r['body'][:50]}...)\n"
+                news_text += f"- {r['title']} ({r['body'][:60]}...)\n"
     except: pass
     
+    # 【戦略2】もし24時間以内がなければ、数日以内のニュースを探す
     if not news_text:
         try:
-            results = ddgs.text(f"{code} {name} 株価 材料", region='jp-jp', timelimit='w', max_results=3)
+            results = ddgs.text(f"{code} {name} 決算 ニュース", region='jp-jp', timelimit='w', max_results=5)
             if results:
-                news_text += "\n【市場の材料】\n"
+                news_text += "【直近1週間のニュース】\n"
                 for r in results:
-                    news_text += f"- {r['title']}\n"
+                    news_text += f"- {r['title']} ({r['body'][:50]}...)\n"
+        except: pass
+
+    # 【戦略3】材料検索
+    if len(news_text) < 200: # 情報が少なければ追加検索
+        try:
+            results = ddgs.text(f"{code} {name} 株価材料 上方修正", region='jp-jp', timelimit='w', max_results=3)
+            news_text += "\n【その他の材料】\n"
+            for r in results:
+                news_text += f"- {r['title']}\n"
         except: pass
     
-    return news_text if news_text else "特になし"
+    return news_text if news_text else "最新のニュースが見つかりませんでした。"
 
 # --- UI ---
 st.title("🦅 Deep Dive Investing AI Pro")
@@ -160,125 +160,81 @@ if st.session_state['target_code']:
     code = st.session_state['target_code']
     model = get_model(api_key)
     
-    with st.spinner(f"コード【{code}】のテクニカル＆決算を徹底調査中..."):
+    with st.spinner(f"コード【{code}】の最新決算＆テクニカルを徹底調査中..."):
         try:
-            # データ取得
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="2y")
             info = ticker.info
             
             if hist.empty:
-                st.error("株価データが取得できませんでした。")
+                st.error("データ取得エラー")
             else:
-                # テクニカル計算
                 hist, cross_stat, cross_dtl, kumo_stat, kumo_dtl = calculate_technicals(hist)
-                
                 latest = hist.iloc[-1]
                 price = latest['Close']
                 change_pct = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
                 
                 name = info.get('longName', code)
+                # ニュース取得ロジック強化版を呼び出し
                 news = get_news_deep_dive(code, name)
                 
                 st.header(f"{name} ({code})")
                 
-                # --- 指標パネル（レイアウト修正） ---
-                # 文字切れしないようにMetricではなくMarkdownやBoxを使用
-                
-                # 1行目: 株価とPER/PBR
                 c1, c2, c3 = st.columns(3)
                 c1.metric("株価", f"{price:,.0f}円", f"{change_pct:+.2f}%")
-                
                 val_per = info.get('trailingPE')
                 val_pbr = info.get('priceToBook')
-                c2.metric("PER (株価収益率)", f"{val_per:.1f}倍" if val_per else "-")
-                c3.metric("PBR (株価純資産倍率)", f"{val_pbr:.2f}倍" if val_pbr else "-")
+                c2.metric("PER", f"{val_per:.1f}倍" if val_per else "-")
+                c3.metric("PBR", f"{val_pbr:.2f}倍" if val_pbr else "-")
                 
-                # 2行目: テクニカル判定（大きなボックスで表示）
                 st.markdown("##### 🩺 テクニカル判定")
                 t1, t2 = st.columns(2)
-                
-                # クロス判定の色分け
-                if "ゴールデン" in cross_stat:
-                    t1.success(f"**{cross_stat}**\n\n{cross_dtl}")
-                elif "デッド" in cross_stat:
-                    t1.error(f"**{cross_stat}**\n\n{cross_dtl}")
-                else:
-                    t1.info(f"**{cross_stat}**\n\n{cross_dtl}")
+                if "ゴールデン" in cross_stat: t1.success(f"**{cross_stat}**\n\n{cross_dtl}")
+                elif "デッド" in cross_stat: t1.error(f"**{cross_stat}**\n\n{cross_dtl}")
+                else: t1.info(f"**{cross_stat}**\n\n{cross_dtl}")
 
-                # 雲判定の色分け
-                if "上抜け" in kumo_stat:
-                    t2.success(f"**{kumo_stat}**\n\n{kumo_dtl}")
-                elif "下抜け" in kumo_stat:
-                    t2.error(f"**{kumo_stat}**\n\n{kumo_dtl}")
-                else:
-                    t2.info(f"**{kumo_stat}**\n\n{kumo_dtl}")
+                if "上抜け" in kumo_stat: t2.success(f"**{kumo_stat}**\n\n{kumo_dtl}")
+                elif "下抜け" in kumo_stat: t2.error(f"**{kumo_stat}**\n\n{kumo_dtl}")
+                else: t2.info(f"**{kumo_stat}**\n\n{kumo_dtl}")
 
-                # --- チャート（雲の描画追加） ---
                 st.subheader("📈 一目均衡表 & テクニカルチャート")
-                display_hist = hist.tail(150) # 少し長めに表示
-                
+                display_hist = hist.tail(150)
                 fig = go.Figure()
-                
-                # 雲 (先行スパンAとBの間を塗る)
-                # Plotlyのバグ回避のため、AとBを表示してから塗りつぶし設定を行う
-                fig.add_trace(go.Scatter(
-                    x=display_hist.index, y=display_hist['SpanA'],
-                    line=dict(width=0), name='先行スパンA', showlegend=False, hoverinfo='skip'
-                ))
-                fig.add_trace(go.Scatter(
-                    x=display_hist.index, y=display_hist['SpanB'],
-                    line=dict(width=0), name='雲 (抵抗帯)',
-                    fill='tonexty', # ひとつ前のトレース(SpanA)との間を塗る
-                    fillcolor='rgba(0, 200, 200, 0.2)' # 薄い青緑
-                ))
-
-                # ローソク足
-                fig.add_trace(go.Candlestick(
-                    x=display_hist.index,
-                    open=display_hist['Open'], high=display_hist['High'],
-                    low=display_hist['Low'], close=display_hist['Close'],
-                    name="株価"
-                ))
-                
-                # 移動平均線
+                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0, 200, 200, 0.2)'))
+                fig.add_trace(go.Candlestick(x=display_hist.index, open=display_hist['Open'], high=display_hist['High'], low=display_hist['Low'], close=display_hist['Close'], name="株価"))
                 fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1.5), name="25日線"))
                 fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1.5), name="75日線"))
-                
                 fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
 
-                # --- AIプロ分析レポート ---
                 st.divider()
                 st.subheader("📝 プロ・アナリストレポート")
                 
                 price_seq = display_hist['Close'].tail(30).tolist()
-                price_seq_str = ",".join([str(int(x)) for x in price_seq])
-                today = datetime.date.today().strftime("%Y年%m月%d日")
+                today = datetime.datetime.now().strftime("%Y年%m月%d日 %H:%M")
 
                 prompt = f"""
-                あなたは機関投資家のシニアアナリストです。今日は「{today}」です。
+                あなたは機関投資家のシニアアナリストです。
+                現在日時は「{today}」です。**今日発表された最新ニュース**があれば、それを最重要視してください。
                 
                 【銘柄】{name} ({code})
-                【現在値】{price:,.0f}円 (PER: {val_per if val_per else '-'}, PBR: {val_pbr if val_pbr else '-'})
+                【現在値】{price:,.0f}円
                 
-                【テクニカル判定】
-                1. 移動平均線: {cross_stat} ({cross_dtl})
-                2. 一目均衡表: {kumo_stat} ({kumo_dtl})
-                3. 直近30日の価格推移: [{price_seq_str}]
-                
-                【最新ニュース・決算情報】
+                【収集したニュース（上にあるほど最新）】
                 {news}
 
                 【指示】
-                以下の構成で辛口に分析してください。ですます調。
-                1. **決算・ファンダメンタルズ評価**:
-                   PER/PBRの水準感と、ニュース内容（決算）が株価に織り込まれているかを評価。
-                2. **テクニカル詳細分析**:
-                   移動平均線のクロスや、一目均衡表の「雲」との位置関係（上にあるか下にあるか）に必ず言及し、トレンドを診断。
-                   チャートパターン（ダブルトップ等）の兆候があれば指摘。
-                3. **売買戦略**:
-                   「雲の上限である〇〇円を割ったら損切り」「25日線で反発したら買い」など具体的なシナリオを提示。
+                以下の構成で分析してください。
+                1. **最新決算・速報分析 (最重要)**:
+                   ニュース欄に「決算」や「速報」があれば、その内容（増益・減益・修正など）を詳しく解説し、ポジティブかネガティブか断定してください。
+                   もし今日発表のニュースが無ければ、「直近の大きな材料は見当たりません」と正直に書いてください。
+                
+                2. **テクニカル分析**:
+                   {cross_stat}、{kumo_stat}という現状を踏まえ、いまエントリーすべきタイミングか解説。
+                
+                3. **売買シナリオ**:
+                   短期的な上値目処、下値目処（損切りライン）を提示。
                 """
                 
                 if model:
@@ -286,9 +242,7 @@ if st.session_state['target_code']:
                         resp = model.generate_content(prompt)
                         st.markdown(resp.text)
                     except Exception as e:
-                        st.error(f"AIレポート生成中にエラーが発生しました: {e}")
-                else:
-                    st.error("AIモデルの接続に失敗しました。APIキーを確認してください。")
+                        st.error(f"AIレポートエラー: {e}")
 
         except Exception as e:
-            st.error(f"システムエラー: {e}")
+            st.error(f"エラー: {e}")
