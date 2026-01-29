@@ -7,13 +7,28 @@ from duckduckgo_search import DDGS
 import time
 import re
 import datetime
+import json
+import os
 
 # --- ページ設定 ---
 st.set_page_config(page_title="Deep Dive Investing AI Pro", layout="wide")
 
+# --- 履歴ファイルの管理 ---
+HISTORY_FILE = 'stock_history.json'
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_history(history_data):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(history_data, f)
+
 # --- セッション初期化 ---
-if 'candidates' not in st.session_state:
-    st.session_state['candidates'] = None
+if 'history' not in st.session_state:
+    st.session_state['history'] = load_history()
 if 'target_code' not in st.session_state:
     st.session_state['target_code'] = None
 
@@ -26,7 +41,24 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 6.0: Full Features")
+st.sidebar.info("Ver 7.0: History & Stable Scoring")
+
+# --- 履歴表示 ---
+st.sidebar.subheader("🕒 最近のチェック")
+history = st.session_state['history']
+if history:
+    sorted_codes = sorted(history.keys(), key=lambda x: history[x]['timestamp'], reverse=True)
+    for c in sorted_codes[:5]: # 最新5件
+        data = history[c]
+        if st.sidebar.button(f"{data['name']} ({c})", key=f"hist_{c}"):
+            st.session_state['target_code'] = c
+            st.rerun()
+    
+    if st.sidebar.button("履歴をクリア"):
+        if os.path.exists(HISTORY_FILE):
+            os.remove(HISTORY_FILE)
+        st.session_state['history'] = {}
+        st.rerun()
 
 # --- 関数群 ---
 
@@ -41,55 +73,74 @@ def get_model(api_key):
     except:
         return None
 
+def safe_get(info, keys, default=None):
+    # yfinanceの辞書から安全に値を取り出す（キーがない場合に備える）
+    for k in keys:
+        val = info.get(k)
+        if val is not None:
+            return val
+    return default
+
 def calculate_scores(hist, info):
     # 最新データの取得
     latest = hist.iloc[-1]
     price = latest['Close']
     
-    # --- 1. オニール式 (成長・モメンタム) スコア ---
+    # --- 1. オニール式 (成長・モメンタム) ---
     oneil_score = 0
-    # (A) 52週高値に近いか？ (高値更新銘柄を狙う)
-    high_52 = info.get('fiftyTwoWeekHigh', price)
+    # (A) 高値圏か (データがない場合は加点も減点もしない)
+    high_52 = safe_get(info, ['fiftyTwoWeekHigh'])
     if high_52:
         dist_high = (high_52 - price) / high_52 * 100
-        if dist_high < 10: oneil_score += 40 # 高値圏
+        if dist_high < 10: oneil_score += 40
         elif dist_high < 20: oneil_score += 20
+    else:
+        oneil_score += 20 # データ欠損時の補正（中立）
     
-    # (B) 出来高の急増 (機関投資家の買い)
+    # (B) 出来高急増 (ザラ場は変動するため、過去平均との比較を緩めに)
     vol_mean = hist['Volume'].rolling(20).mean().iloc[-1]
-    if latest['Volume'] > vol_mean * 1.5: oneil_score += 30
-    elif latest['Volume'] > vol_mean * 1.2: oneil_score += 15
+    current_vol = latest['Volume']
+    # ※場中(12:30など)は出来高が少ないため、前日比なども考慮
+    if current_vol > vol_mean * 1.0: oneil_score += 30 
     
-    # (C) トレンド (25日線の上にあるか)
+    # (C) トレンド (25日線)
     sma25 = hist['Close'].rolling(25).mean().iloc[-1]
     if price > sma25: oneil_score += 30
     
-    # --- 2. グレアム式 (割安・バリュー) スコア ---
+    # --- 2. グレアム式 (割安・バリュー) ---
     graham_score = 0
-    # (A) PER (低いほど良い)
-    eps = info.get('forwardEps', info.get('trailingEps', 0))
-    per = price / eps if eps and eps > 0 else 0
-    if 0 < per < 15: graham_score += 30
-    elif 0 < per < 25: graham_score += 15
+    # (A) PER (データ欠損対策)
+    eps = safe_get(info, ['forwardEps', 'trailingEps'])
+    if eps and eps > 0:
+        per = price / eps
+        if 0 < per < 15: graham_score += 30
+        elif 0 < per < 25: graham_score += 15
+    else:
+        graham_score += 15 # 不明時は中立
     
-    # (B) PBR (低いほど良い)
-    bps = info.get('bookValue', 0)
-    pbr = price / bps if bps and bps > 0 else 0
-    if 0 < pbr < 1.0: graham_score += 20
-    elif 0 < pbr < 1.5: graham_score += 10
+    # (B) PBR
+    bps = safe_get(info, ['bookValue'])
+    if bps and bps > 0:
+        pbr = price / bps
+        if 0 < pbr < 1.0: graham_score += 20
+        elif 0 < pbr < 1.5: graham_score += 10
+    else:
+        graham_score += 10
     
     # (C) 配当利回り
-    div_rate = info.get('dividendRate')
-    div_yield = (div_rate / price * 100) if div_rate else (info.get('dividendYield', 0) * 100)
-    if div_yield > 4.0: graham_score += 30
-    elif div_yield > 3.0: graham_score += 15
+    div_rate = safe_get(info, ['dividendRate', 'dividendYield'])
+    if div_rate:
+        # div_rateが利回り(%)そのものか、配当額(円)か判定
+        yield_pct = div_rate * 100 if div_rate < 1 else (div_rate / price * 100)
+        if yield_pct > 3.5: graham_score += 30
+        elif yield_pct > 2.5: graham_score += 15
     
-    # (D) RSI (売られすぎか)
+    # (D) RSI
     delta = hist['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
     rsi = 100 - (100 / (1 + gain / loss)) if loss != 0 else 50
-    if rsi < 30: graham_score += 20 # 売られすぎ
+    if rsi < 30: graham_score += 20
     elif rsi < 40: graham_score += 10
 
     return oneil_score, graham_score, rsi
@@ -103,21 +154,11 @@ def calculate_technicals(hist):
     prev = hist.iloc[-2]
     
     cross_status = "特になし"
-    cross_detail = "移動平均線のクロスは確認できません"
-    
     if pd.notna(prev['SMA5']) and pd.notna(prev['SMA25']):
-        if prev['SMA5'] < prev['SMA25'] and latest['SMA5'] > latest['SMA25']:
-            cross_status = "ゴールデンクロス"
-            cross_detail = "短期線(5日)が中期線(25日)を上抜け (買いサイン)"
-        elif prev['SMA25'] < prev['SMA75'] and latest['SMA25'] > latest['SMA75']:
-            cross_status = "ゴールデンクロス"
-            cross_detail = "中期線(25日)が長期線(75日)を上抜け (強い買いサイン)"
-        elif prev['SMA5'] > prev['SMA25'] and latest['SMA5'] < latest['SMA25']:
-            cross_status = "デッドクロス"
-            cross_detail = "短期線(5日)が中期線(25日)を下抜け (売りサイン)"
-        elif prev['SMA25'] > prev['SMA75'] and latest['SMA25'] < latest['SMA75']:
-            cross_status = "デッドクロス"
-            cross_detail = "中期線(25日)が長期線(75日)を下抜け (強い売りサイン)"
+        if prev['SMA5'] < prev['SMA25'] and latest['SMA5'] > latest['SMA25']: cross_status = "ゴールデンクロス (短期)"
+        elif prev['SMA25'] < prev['SMA75'] and latest['SMA25'] > latest['SMA75']: cross_status = "ゴールデンクロス (長期)"
+        elif prev['SMA5'] > prev['SMA25'] and latest['SMA5'] < latest['SMA25']: cross_status = "デッドクロス (短期)"
+        elif prev['SMA25'] > prev['SMA75'] and latest['SMA25'] < latest['SMA75']: cross_status = "デッドクロス (長期)"
 
     high9 = hist['High'].rolling(window=9).max()
     low9 = hist['Low'].rolling(window=9).min()
@@ -129,86 +170,73 @@ def calculate_technicals(hist):
     hist['SpanB'] = ((hist['High'].rolling(52).max() + hist['Low'].rolling(52).min()) / 2).shift(26)
     
     kumo_status = "雲の中"
-    kumo_detail = "株価は雲の中にあります"
-    current_price = latest['Close']
-    span_a = hist['SpanA'].iloc[-1]
-    span_b = hist['SpanB'].iloc[-1]
-    
-    if pd.notna(span_a) and pd.notna(span_b):
-        if current_price > max(span_a, span_b):
-            kumo_status = "雲上抜け"
-            kumo_detail = "株価が雲を上に抜けました (強気入り)"
-        elif current_price < min(span_a, span_b):
-            kumo_status = "雲下抜け"
-            kumo_detail = "株価が雲を下に抜けました (弱気入り)"
+    current = latest['Close']
+    sa, sb = hist['SpanA'].iloc[-1], hist['SpanB'].iloc[-1]
+    if pd.notna(sa) and pd.notna(sb):
+        if current > max(sa, sb): kumo_status = "雲上抜け (強気)"
+        elif current < min(sa, sb): kumo_status = "雲下抜け (弱気)"
 
-    return hist, cross_status, cross_detail, kumo_status, kumo_detail
+    return hist, cross_status, kumo_status
 
 def get_news_deep_dive(code, name):
     ddgs = DDGS()
     news_text = ""
-    # 24時間以内の速報
-    try:
-        results = ddgs.text(f"{code} {name} 決算短信 発表 結果", region='jp-jp', timelimit='d', max_results=5)
-        if results:
-            news_text += "【🚨 HOT: 24時間以内の最新情報】\n"
-            for r in results:
-                news_text += f"- {r['title']} ({r['body'][:60]}...)\n"
-    except: pass
     
-    if not news_text:
+    # 【改良】15:30以降の情報を取るため、「決算短信」や「PDF」を狙う
+    # timelimit='d' (1日以内) は必須
+    queries = [
+        f"{code} {name} 決算短信 発表 2026", # 一次情報を狙う
+        f"{code} {name} 決算 サプライズ 速報"  # 速報記事を狙う
+    ]
+    
+    for q in queries:
         try:
-            results = ddgs.text(f"{code} {name} 決算 ニュース", region='jp-jp', timelimit='w', max_results=5)
+            results = ddgs.text(q, region='jp-jp', timelimit='d', max_results=3)
             if results:
-                news_text += "【直近1週間のニュース】\n"
                 for r in results:
-                    news_text += f"- {r['title']} ({r['body'][:50]}...)\n"
+                    # 重複排除
+                    if r['title'] not in news_text:
+                        news_text += f"- {r['title']} ({r['body'][:60]}...)\n"
         except: pass
+        if len(news_text) > 300: break # 十分取れたら終了
 
-    if len(news_text) < 200:
-        try:
-            results = ddgs.text(f"{code} {name} 株価材料 上方修正", region='jp-jp', timelimit='w', max_results=3)
-            news_text += "\n【その他の材料】\n"
-            for r in results:
-                news_text += f"- {r['title']}\n"
-        except: pass
-    
-    return news_text if news_text else "最新のニュースが見つかりませんでした。"
+    if not news_text:
+        return "直近24時間以内の重要ニュースは見当たりませんでした（15:30前の可能性あり）。"
+    return news_text
 
 # --- UI ---
-st.title("🦅 Deep Dive Investing AI Pro")
-query = st.text_input("銘柄コードまたは企業名", placeholder="例: 7203 または トヨタ")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 7.0)")
+query = st.text_input("銘柄コードまたは企業名", placeholder="例: 6702")
 
 if st.button("🔍 プロ分析開始", type="primary"):
-    if not api_key:
-        st.error("APIキーを入れてください")
-    elif not query:
-        st.warning("銘柄を入力してください")
+    if not api_key: st.error("APIキーを入れてください"); st.stop()
+    if not query: st.warning("銘柄を入力してください"); st.stop()
+    
+    target_code = None
+    if re.fullmatch(r'\d{4}', query.strip()):
+        target_code = query.strip()
     else:
-        target_code = None
-        if re.fullmatch(r'\d{4}', query.strip()):
-            target_code = query.strip()
-        else:
-            with st.spinner("銘柄コード検索中..."):
-                model = get_model(api_key)
-                if model:
-                    try:
-                        resp = model.generate_content(f"日本株「{query}」の銘柄コード(4桁)のみを返して。")
-                        match = re.search(r'\d{4}', resp.text)
-                        if match: target_code = match.group(0)
-                    except: pass
-        if target_code:
-            st.session_state['target_code'] = target_code
-            st.rerun()
-        else:
-            st.error("銘柄が見つかりませんでした")
+        with st.spinner("銘柄特定中..."):
+            model = get_model(api_key)
+            if model:
+                try:
+                    resp = model.generate_content(f"日本株「{query}」のコード(4桁)のみ出力。")
+                    match = re.search(r'\d{4}', resp.text)
+                    if match: target_code = match.group(0)
+                except: pass
+    
+    if target_code:
+        st.session_state['target_code'] = target_code
+        st.rerun()
+    else:
+        st.error("銘柄が見つかりませんでした")
 
 # --- 分析実行 ---
 if st.session_state['target_code']:
     code = st.session_state['target_code']
     model = get_model(api_key)
     
-    with st.spinner(f"コード【{code}】のテクニカル＆ファンダメンタルズを徹底調査中..."):
+    with st.spinner(f"コード【{code}】の最新情報（15:30以降対応）を取得中..."):
         try:
             ticker = yf.Ticker(f"{code}.T")
             hist = ticker.history(period="2y")
@@ -217,9 +245,9 @@ if st.session_state['target_code']:
             if hist.empty:
                 st.error("データ取得エラー")
             else:
-                # 計算処理
-                hist, cross_stat, cross_dtl, kumo_stat, kumo_dtl = calculate_technicals(hist)
-                oneil_score, graham_score, rsi = calculate_scores(hist, info)
+                # 計算
+                hist, cross_stat, kumo_stat = calculate_technicals(hist)
+                oneil, graham, rsi = calculate_scores(hist, info)
                 
                 latest = hist.iloc[-1]
                 price = latest['Close']
@@ -227,93 +255,90 @@ if st.session_state['target_code']:
                 name = info.get('longName', code)
                 news = get_news_deep_dive(code, name)
                 
+                # --- 履歴の確認と保存 ---
+                prev_data = st.session_state['history'].get(code, None)
+                
+                # 今回のデータを保存用辞書に
+                current_data = {
+                    'name': name,
+                    'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    'price': price,
+                    'oneil': oneil,
+                    'graham': graham
+                }
+                # 保存実行
+                st.session_state['history'][code] = current_data
+                save_history(st.session_state['history'])
+
+                # --- 表示 ---
                 st.header(f"{name} ({code})")
                 
-                # --- メトリクス ---
+                # 変化の表示（前回との比較）
+                if prev_data:
+                    st.info(f"🔄 **前回チェック時 ({prev_data['timestamp']}) からの変化:**")
+                    p_diff = price - prev_data['price']
+                    o_diff = oneil - prev_data['oneil']
+                    g_diff = graham - prev_data['graham']
+                    
+                    col_h1, col_h2, col_h3 = st.columns(3)
+                    col_h1.metric("株価変化", f"{p_diff:+.0f}円", delta_color="normal")
+                    col_h2.metric("成長スコア変化", f"{o_diff:+d}点")
+                    col_h3.metric("割安スコア変化", f"{g_diff:+d}点")
+                else:
+                    st.success("✨ 初めて分析する銘柄です。履歴に保存しました。")
+
+                st.divider()
+
+                # メイン指標
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("株価", f"{price:,.0f}円", f"{change_pct:+.2f}%")
-                c2.metric("RSI (売られすぎ判定)", f"{rsi:.1f}")
-                c3.metric("成長株スコア (順張り)", f"{oneil_score}点", help="オニール流：高値更新やモメンタムを重視")
-                c4.metric("割安株スコア (逆張り)", f"{graham_score}点", help="グレアム流：PER/PBRや配当を重視")
+                c1.metric("現在値", f"{price:,.0f}円", f"{change_pct:+.2f}%")
+                c2.metric("RSI", f"{rsi:.1f}")
+                c3.metric("成長株スコア", f"{oneil}点")
+                c4.metric("割安株スコア", f"{graham}点")
                 
-                # --- スコアバー ---
-                st.write("##### 📊 投資スタイル診断")
-                score_fig = go.Figure()
-                score_fig.add_trace(go.Bar(
-                    y=['成長性 (オニール)', '割安性 (グレアム)'],
-                    x=[oneil_score, graham_score],
-                    orientation='h',
-                    marker_color=['#ff6b6b', '#4ecdc4'],
-                    text=[f"{oneil_score}点", f"{graham_score}点"],
-                    textposition='auto'
-                ))
-                score_fig.update_layout(height=200, xaxis=dict(range=[0, 100]), margin=dict(l=0, r=0, t=0, b=0), template="plotly_dark")
-                st.plotly_chart(score_fig, use_container_width=True)
-
-                # --- テクニカル判定 ---
-                st.markdown("##### 🩺 テクニカル判定")
+                # テクニカル
                 t1, t2 = st.columns(2)
-                if "ゴールデン" in cross_stat: t1.success(f"**{cross_stat}**\n\n{cross_dtl}")
-                elif "デッド" in cross_stat: t1.error(f"**{cross_stat}**\n\n{cross_dtl}")
-                else: t1.info(f"**{cross_stat}**\n\n{cross_dtl}")
+                t1.info(f"MA判定: **{cross_stat}**")
+                t2.info(f"一目判定: **{kumo_stat}**")
 
-                if "上抜け" in kumo_stat: t2.success(f"**{kumo_stat}**\n\n{kumo_dtl}")
-                elif "下抜け" in kumo_stat: t2.error(f"**{kumo_stat}**\n\n{kumo_dtl}")
-                else: t2.info(f"**{kumo_stat}**\n\n{kumo_dtl}")
-
-                # --- チャート ---
-                st.subheader("📈 一目均衡表 & テクニカルチャート")
-                display_hist = hist.tail(150)
+                # チャート
+                st.subheader("📈 チャート")
+                display_hist = hist.tail(100)
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
                 fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0, 200, 200, 0.2)'))
                 fig.add_trace(go.Candlestick(x=display_hist.index, open=display_hist['Open'], high=display_hist['High'], low=display_hist['Low'], close=display_hist['Close'], name="株価"))
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1.5), name="25日線"))
-                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1.5), name="75日線"))
-                fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_dark")
+                fig.update_layout(height=400, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig, use_container_width=True)
 
-                # --- AIレポート ---
-                st.divider()
-                st.subheader("📝 プロ・アナリストレポート")
-                today = datetime.datetime.now().strftime("%Y年%m月%d日 %H:%M")
+                # AIレポート
+                st.subheader("📝 決算 & AI分析")
                 
-                # スコアに基づく判定ロジック
-                judge_text = "様子見"
-                if oneil_score >= 70: judge_text = "買い (成長株として有望)"
-                elif graham_score >= 70: judge_text = "買い (割安株として有望)"
-                elif oneil_score < 30 and graham_score < 30: judge_text = "売り推奨 (魅力薄)"
-
                 prompt = f"""
-                あなたは機関投資家のシニアアナリストです。
-                現在日時は「{today}」です。
+                あなたは機関投資家です。
+                現在日時は「{datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}」です。
+                【最重要】本日発表された「決算短信」や「業績修正」があれば、その数値を元に徹底的に分析してください。
                 
-                【銘柄】{name} ({code})
-                【判定スコア】成長性(オニール):{oneil_score}点, 割安性(グレアム):{graham_score}点
-                【AI暫定判定】{judge_text}
+                銘柄: {name} ({code})
+                株価: {price}円
+                ニュース: {news}
+                スコア: 成長{oneil}点, 割安{graham}点
                 
-                【最新ニュース・決算 (重要)】
-                {news}
-
-                【指示】
-                以下の構成で分析してください。
-                1. **最新決算・ニュース分析**:
-                   今日発表のニュースがあれば最優先で解説。コンセンサス比較や市場の反応を予測。
-                
-                2. **スコア評価 (オニール＆グレアム)**:
-                   成長株として見るべきか、割安株として見るべきか？スコアの点数を引用して解説。
-                   例：「オニールスコアが高いため、高値ブレイク狙いが有効です」など。
-                
-                3. **テクニカル＆売買戦略**:
-                   {kumo_stat}や{cross_stat}を踏まえ、具体的なエントリー価格と損切りラインを提示。
+                指示:
+                1. **本日の決算速報**:
+                   ニュースに「決算」「増益」「減益」「修正」などの単語があれば、その内容を詳述。
+                   もし15:30以降の最新情報が見つからない場合は「現時点で直近の決算発表ニュースは確認できません」と正直に記述。
+                2. **スコア評価**:
+                   点数が高い/低い要因を推測。
+                3. **売買判断**:
+                   明日の寄り付きはどう動くか予測し、戦略を提示。
                 """
                 
                 if model:
                     try:
                         resp = model.generate_content(prompt)
                         st.markdown(resp.text)
-                    except Exception as e:
-                        st.error(f"AIレポートエラー: {e}")
+                    except: st.error("AI生成エラー")
 
         except Exception as e:
-            st.error(f"システムエラー: {e}")
+            st.error(f"エラー: {e}")
