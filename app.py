@@ -33,14 +33,12 @@ def save_history(data):
 # --- 初期化 ---
 if 'history' not in st.session_state: st.session_state['history'] = load_history()
 if 'target_code' not in st.session_state: st.session_state['target_code'] = None
-
-# 【修正】スクリーニング用の入力値を保持する箱を作る
-if 'screener_codes' not in st.session_state:
-    st.session_state['screener_codes'] = "6758, 7203, 9984" # デフォルト値
+if 'screener_codes' not in st.session_state: st.session_state['screener_codes'] = "6758, 7203, 9984"
 
 # --- サイドバー ---
 st.sidebar.title("🦅 Deep Dive Pro")
-mode = st.sidebar.radio("モード選択", ["🔍 個別詳細分析", "💎 お宝発掘 (一括採点)"])
+# モードに「ダッシュボード」を追加
+mode = st.sidebar.radio("モード選択", ["🏠 市場ダッシュボード", "🔍 個別詳細分析", "💎 お宝発掘 (一括採点)"])
 
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -49,21 +47,22 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 11.1: Fix Buttons")
+st.sidebar.info("Ver 12.0: Market Dashboard")
 
-# 個別分析用の履歴
+# 個別分析用設定
 if mode == "🔍 個別詳細分析":
     st.sidebar.subheader("🎨 チャート設定")
     show_bollinger = st.sidebar.checkbox("ボリンジャーバンド", value=True)
     show_ichimoku = st.sidebar.checkbox("一目均衡表", value=True)
-
+    
+    # 履歴ボタン
     history = st.session_state['history']
     if history:
-        sorted_codes = sorted(history.keys(), key=lambda x: history[x].get('timestamp', ''), reverse=True)
         st.sidebar.subheader("🕒 最近の履歴")
+        sorted_codes = sorted(history.keys(), key=lambda x: history[x].get('timestamp', ''), reverse=True)
         for c in sorted_codes[:5]:
             d = history[c]
-            if st.sidebar.button(f"{d['name']} ({c})", key=f"h_{c}"):
+            if st.sidebar.button(f"{d['name']} ({c})", key=f"side_{c}"):
                 st.session_state['target_code'] = c
                 st.rerun()
         if st.sidebar.button("履歴クリア"):
@@ -191,21 +190,91 @@ def get_news(code, name):
     return txt if txt else "直近の重要ニュースなし"
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 11.1)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 12.0)")
 
 # ==========================================
-# モード1: 💎 お宝発掘 (一括採点)
+# モード0: 🏠 市場ダッシュボード (NEW!)
 # ==========================================
-if mode == "💎 お宝発掘 (一括採点)":
+if mode == "🏠 市場ダッシュボード":
+    st.header("📈 Market Dashboard")
+    
+    # 1. 市場概況 (日経平均・ドル円)
+    # yfinanceで ^N225, JPY=X を取得
+    col_m1, col_m2, col_m3 = st.columns(3)
+    
+    with st.spinner("市場データを取得中..."):
+        try:
+            # 日経平均
+            nk = yf.Ticker("^N225").history(period="2d")
+            if not nk.empty:
+                nk_price = nk['Close'].iloc[-1]
+                nk_diff = nk_price - nk['Close'].iloc[-2]
+                col_m1.metric("🇯🇵 日経平均", f"{nk_price:,.0f}", f"{nk_diff:+.0f}")
+            
+            # ドル円
+            usdjpy = yf.Ticker("JPY=X").history(period="2d")
+            if not usdjpy.empty:
+                uj_price = usdjpy['Close'].iloc[-1]
+                uj_diff = uj_price - usdjpy['Close'].iloc[-2]
+                col_m2.metric("🇺🇸/🇯🇵 ドル円", f"{uj_price:.2f}", f"{uj_diff:+.2f}")
+                
+            col_m3.info(f"現在日時: {get_current_time_jst().strftime('%Y-%m-%d %H:%M')}")
+        except:
+            st.error("市場データの取得に失敗しました")
+
+    st.divider()
+
+    # 2. 注目銘柄ランキング (履歴から)
+    st.subheader("🏆 あなたの監視銘柄 Top Picks")
+    history = st.session_state['history']
+    if history:
+        # スコア順にソートしてTop5を表示
+        ranked_items = []
+        for code, data in history.items():
+            # 成長 + 割安 の合計スコアで簡易ランク付け
+            total_score = data.get('oneil', 0) + data.get('graham', 0)
+            ranked_items.append({
+                'code': code,
+                'name': data['name'],
+                'price': data['price'],
+                'score': total_score,
+                'oneil': data.get('oneil', 0),
+                'graham': data.get('graham', 0),
+                'date': data.get('timestamp', '-')
+            })
+        
+        # ソート
+        ranked_items.sort(key=lambda x: x['score'], reverse=True)
+        
+        # カード表示
+        for item in ranked_items[:3]: # Top 3
+            with st.container(border=True):
+                c_head, c_body, c_act = st.columns([2, 3, 1])
+                c_head.markdown(f"### {item['name']}")
+                c_head.caption(f"Code: {item['code']}")
+                
+                c_body.metric("総合スコア", f"{item['score']}点", f"株価: {item['price']:,.0f}円")
+                c_body.progress(min(item['score'], 200) / 200) # バー表示
+                
+                if c_act.button("詳細分析", key=f"dash_{item['code']}"):
+                    st.session_state['target_code'] = item['code']
+                    # モードを強制的に切り替えるハックはないが、Rerunで個別画面に誘導する工夫
+                    # (今回はシンプルにtarget_codeセットして、ユーザーにタブ切り替えを促すメッセージを出す)
+                    st.success(f"セット完了！サイドバーから「🔍 個別詳細分析」を選んでください。")
+
+    else:
+        st.info("まだ履歴がありません。「個別詳細分析」や「お宝発掘」で銘柄を探してみましょう！")
+
+# ==========================================
+# モード1: 💎 お宝発掘
+# ==========================================
+elif mode == "💎 お宝発掘 (一括採点)":
     st.header("💎 お宝銘柄ハンター")
     st.markdown("複数の銘柄を一括分析し、**スコア80点以上**の有望株を発掘します。")
-    st.info("💡 この機能はAIを使わないため、**API制限中でも動作します！**")
     
-    # 【修正】コールバック関数で値をセットする
     def set_preset(codes):
         st.session_state['screener_codes'] = codes
 
-    # プリセットボタン
     col_p1, col_p2, col_p3 = st.columns(3)
     if col_p1.button("🇯🇵 日経・人気"):
         set_preset("7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432")
@@ -215,7 +284,6 @@ if mode == "💎 お宝発掘 (一括採点)":
         set_preset("8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752")
 
     with st.form("screener_form"):
-        # keyを指定してセッション状態と同期させる
         input_codes_str = st.text_area("銘柄コードを入力 (カンマ区切り)", key="screener_codes")
         scan_btn = st.form_submit_button("🛡️ 一括スキャン開始", type="primary")
     
@@ -238,7 +306,6 @@ if mode == "💎 お宝発掘 (一括採点)":
                             info = tk.info
                             o_score, g_score, rsi = calculate_scores(hist, info)
                             hist, cross, kumo = calculate_technicals(hist)
-                            
                             name = info.get('longName', c)
                             price = hist['Close'].iloc[-1]
                             
@@ -247,39 +314,26 @@ if mode == "💎 お宝発掘 (一括採点)":
                             if g_score >= 80: judge += "💎割安 "
                             
                             results.append({
-                                "コード": c,
-                                "銘柄名": name,
-                                "株価": f"{price:,.0f}円",
-                                "成長(オニール)": o_score,
-                                "割安(グレアム)": g_score,
-                                "RSI": round(rsi, 1),
-                                "MA判定": cross,
-                                "一目": kumo,
-                                "有望度": judge
+                                "コード": c, "銘柄名": name, "株価": f"{price:,.0f}円",
+                                "成長(オニール)": o_score, "割安(グレアム)": g_score,
+                                "RSI": round(rsi, 1), "MA判定": cross, "一目": kumo, "有望度": judge
                             })
                     time.sleep(0.5) 
                     progress.progress((i + 1) / len(codes))
                 except: pass
             
-            status_text.empty()
-            progress.empty()
+            status_text.empty(); progress.empty()
             
             if results:
                 df = pd.DataFrame(results)
                 df = df.sort_values(by=["成長(オニール)", "割安(グレアム)"], ascending=False)
-                
                 def highlight_high_score(s):
                     is_high = s >= 80
                     return ['background-color: #2e4a33; color: white; font-weight: bold;' if v else '' for v in is_high]
 
                 st.success(f"{len(results)}銘柄の分析が完了しました！")
-                st.dataframe(
-                    df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]),
-                    use_container_width=True,
-                    height=500
-                )
-            else:
-                st.error("有効なデータが取得できませんでした。")
+                st.dataframe(df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]), use_container_width=True, height=500)
+            else: st.error("有効なデータなし")
 
 
 # ==========================================
@@ -293,7 +347,6 @@ elif mode == "🔍 個別詳細分析":
     if submitted:
         if not api_key: st.error("APIキーが必要です"); st.stop()
         if not q: st.warning("入力を確認してください"); st.stop()
-        
         tgt = None
         if re.fullmatch(r'\d{4}', q.strip()): tgt = q.strip()
         else:
@@ -405,8 +458,6 @@ elif mode == "🔍 個別詳細分析":
                             
                             csv = hist.to_csv().encode('utf-8')
                             st.download_button(label="📥 株価CSVダウンロード", data=csv, file_name=f"{code}_data.csv", mime='text/csv')
-                        else:
-                            st.info("財務データなし")
+                        else: st.info("財務データなし")
                     except Exception as e: st.error(f"Financial Error: {e}")
-
             except Exception as e: st.error(f"データ取得エラー: {e}")
