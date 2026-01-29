@@ -34,9 +34,12 @@ def save_history(data):
 if 'history' not in st.session_state: st.session_state['history'] = load_history()
 if 'target_code' not in st.session_state: st.session_state['target_code'] = None
 
+# 【修正】スクリーニング用の入力値を保持する箱を作る
+if 'screener_codes' not in st.session_state:
+    st.session_state['screener_codes'] = "6758, 7203, 9984" # デフォルト値
+
 # --- サイドバー ---
 st.sidebar.title("🦅 Deep Dive Pro")
-# モード切替スイッチ
 mode = st.sidebar.radio("モード選択", ["🔍 個別詳細分析", "💎 お宝発掘 (一括採点)"])
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -46,15 +49,14 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 11.0: Market Hunter")
+st.sidebar.info("Ver 11.1: Fix Buttons")
 
-# チャート設定 (個別分析用)
+# 個別分析用の履歴
 if mode == "🔍 個別詳細分析":
     st.sidebar.subheader("🎨 チャート設定")
     show_bollinger = st.sidebar.checkbox("ボリンジャーバンド", value=True)
     show_ichimoku = st.sidebar.checkbox("一目均衡表", value=True)
 
-    # 履歴表示
     history = st.session_state['history']
     if history:
         sorted_codes = sorted(history.keys(), key=lambda x: history[x].get('timestamp', ''), reverse=True)
@@ -98,10 +100,8 @@ def calculate_scores(hist, info):
         if dist < 10: oneil += 40
         elif dist < 20: oneil += 20
     else: oneil += 20
-    
     vol_mean = hist['Volume'].rolling(20).mean().iloc[-1]
     if latest['Volume'] > vol_mean: oneil += 30
-    
     sma25 = hist['Close'].rolling(25).mean().iloc[-1]
     if price > sma25: oneil += 30
     
@@ -113,20 +113,18 @@ def calculate_scores(hist, info):
         if 0 < per < 15: graham += 30
         elif 0 < per < 25: graham += 15
     else: graham += 15
-    
     bps = safe_get(info, ['bookValue'])
     if bps and bps > 0:
         pbr = price / bps
         if 0 < pbr < 1.0: graham += 20
         elif 0 < pbr < 1.5: graham += 10
     else: graham += 10
-    
     div = safe_get(info, ['dividendRate', 'dividendYield'])
     if div:
         yld = div * 100 if div < 1 else (div / price * 100)
         if yld > 3.5: graham += 30
         elif yld > 2.5: graham += 15
-        
+    
     delta = hist['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean().iloc[-1]
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
@@ -140,14 +138,11 @@ def calculate_technicals(hist):
     hist['SMA5'] = hist['Close'].rolling(5).mean()
     hist['SMA25'] = hist['Close'].rolling(25).mean()
     hist['SMA75'] = hist['Close'].rolling(75).mean()
-    
-    # Bollinger
     hist['std20'] = hist['Close'].rolling(20).std()
     hist['SMA20'] = hist['Close'].rolling(20).mean()
     hist['Upper'] = hist['SMA20'] + (hist['std20'] * 2)
     hist['Lower'] = hist['SMA20'] - (hist['std20'] * 2)
 
-    # Ichimoku
     h9 = hist['High'].rolling(9).max(); l9 = hist['Low'].rolling(9).min()
     tenkan = (h9 + l9) / 2
     h26 = hist['High'].rolling(26).max(); l26 = hist['Low'].rolling(26).min()
@@ -196,7 +191,7 @@ def get_news(code, name):
     return txt if txt else "直近の重要ニュースなし"
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 11.0)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 11.1)")
 
 # ==========================================
 # モード1: 💎 お宝発掘 (一括採点)
@@ -206,84 +201,89 @@ if mode == "💎 お宝発掘 (一括採点)":
     st.markdown("複数の銘柄を一括分析し、**スコア80点以上**の有望株を発掘します。")
     st.info("💡 この機能はAIを使わないため、**API制限中でも動作します！**")
     
+    # 【修正】コールバック関数で値をセットする
+    def set_preset(codes):
+        st.session_state['screener_codes'] = codes
+
     # プリセットボタン
     col_p1, col_p2, col_p3 = st.columns(3)
-    preset_codes = ""
-    if col_p1.button("🇯🇵 日経平均・人気10選"):
-        preset_codes = "7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432"
-    if col_p2.button("💰 高配当・バリュー10選"):
-        preset_codes = "8306, 8316, 2914, 8058, 8001, 8002, 9433, 9434, 4503, 5401"
-    if col_p3.button("🚀 半導体・ハイテク10選"):
-        preset_codes = "8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752"
+    if col_p1.button("🇯🇵 日経・人気"):
+        set_preset("7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432")
+    if col_p2.button("💰 高配当・割安"):
+        set_preset("8306, 8316, 2914, 8058, 8001, 8002, 9433, 9434, 4503, 5401")
+    if col_p3.button("🚀 半導体・ハイテク"):
+        set_preset("8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752")
 
     with st.form("screener_form"):
-        input_codes = st.text_area("銘柄コードを入力 (カンマ区切り)", value=preset_codes, placeholder="例: 6758, 7203, 9984")
+        # keyを指定してセッション状態と同期させる
+        input_codes_str = st.text_area("銘柄コードを入力 (カンマ区切り)", key="screener_codes")
         scan_btn = st.form_submit_button("🛡️ 一括スキャン開始", type="primary")
     
-    if scan_btn and input_codes:
-        codes = [c.strip() for c in input_codes.replace("、", ",").split(",") if c.strip()]
-        results = []
-        progress = st.progress(0)
-        
-        for i, c in enumerate(codes):
-            try:
-                # 4桁コードのみ処理
-                if re.match(r'\d{4}', c):
-                    tk = yf.Ticker(f"{c}.T")
-                    hist = tk.history(period="1y")
-                    if not hist.empty:
-                        info = tk.info
-                        o_score, g_score, rsi = calculate_scores(hist, info)
-                        hist, cross, kumo = calculate_technicals(hist)
-                        
-                        name = info.get('longName', c)
-                        price = hist['Close'].iloc[-1]
-                        
-                        # 判定
-                        judge = ""
-                        if o_score >= 80: judge += "🏆成長株 "
-                        if g_score >= 80: judge += "💎割安株 "
-                        
-                        results.append({
-                            "コード": c,
-                            "銘柄名": name,
-                            "株価": f"{price:,.0f}円",
-                            "成長(オニール)": o_score,
-                            "割安(グレアム)": g_score,
-                            "RSI": round(rsi, 1),
-                            "MA判定": cross,
-                            "一目": kumo,
-                            "有望度": judge
-                        })
-                time.sleep(0.5) # 負荷軽減
-                progress.progress((i + 1) / len(codes))
-            except: pass
-            
-        progress.empty()
-        
-        if results:
-            df = pd.DataFrame(results)
-            # スコア順にソート
-            df = df.sort_values(by=["成長(オニール)", "割安(グレアム)"], ascending=False)
-            
-            # ハイライト表示 (80点以上)
-            def highlight_high_score(s):
-                is_high = s >= 80
-                return ['background-color: #334433' if v else '' for v in is_high]
-
-            st.success(f"{len(results)}銘柄の分析が完了しました！")
-            st.dataframe(
-                df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]),
-                use_container_width=True,
-                height=400
-            )
-            st.info("※成長スコアまたは割安スコアが **80点以上** のセルは緑色で強調されます。")
+    if scan_btn:
+        codes = [c.strip() for c in input_codes_str.replace("、", ",").split(",") if c.strip()]
+        if not codes:
+            st.warning("コードを入力してください")
         else:
-            st.error("データが取得できませんでした。コードを確認してください。")
+            results = []
+            progress = st.progress(0)
+            status_text = st.empty()
+            
+            for i, c in enumerate(codes):
+                status_text.text(f"分析中... {c}")
+                try:
+                    if re.match(r'\d{4}', c):
+                        tk = yf.Ticker(f"{c}.T")
+                        hist = tk.history(period="1y")
+                        if not hist.empty:
+                            info = tk.info
+                            o_score, g_score, rsi = calculate_scores(hist, info)
+                            hist, cross, kumo = calculate_technicals(hist)
+                            
+                            name = info.get('longName', c)
+                            price = hist['Close'].iloc[-1]
+                            
+                            judge = ""
+                            if o_score >= 80: judge += "🏆成長 "
+                            if g_score >= 80: judge += "💎割安 "
+                            
+                            results.append({
+                                "コード": c,
+                                "銘柄名": name,
+                                "株価": f"{price:,.0f}円",
+                                "成長(オニール)": o_score,
+                                "割安(グレアム)": g_score,
+                                "RSI": round(rsi, 1),
+                                "MA判定": cross,
+                                "一目": kumo,
+                                "有望度": judge
+                            })
+                    time.sleep(0.5) 
+                    progress.progress((i + 1) / len(codes))
+                except: pass
+            
+            status_text.empty()
+            progress.empty()
+            
+            if results:
+                df = pd.DataFrame(results)
+                df = df.sort_values(by=["成長(オニール)", "割安(グレアム)"], ascending=False)
+                
+                def highlight_high_score(s):
+                    is_high = s >= 80
+                    return ['background-color: #2e4a33; color: white; font-weight: bold;' if v else '' for v in is_high]
+
+                st.success(f"{len(results)}銘柄の分析が完了しました！")
+                st.dataframe(
+                    df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]),
+                    use_container_width=True,
+                    height=500
+                )
+            else:
+                st.error("有効なデータが取得できませんでした。")
 
 
 # ==========================================
-# モード2: 🔍 個別詳細分析 (従来の画面)
+# モード2: 🔍 個別詳細分析
 # ==========================================
 elif mode == "🔍 個別詳細分析":
     with st.form('search'):
@@ -308,7 +308,6 @@ elif mode == "🔍 個別詳細分析":
         if tgt: st.session_state['target_code'] = tgt
         else: st.error("銘柄が見つかりませんでした")
 
-    # 個別分析実行
     if st.session_state['target_code']:
         code = st.session_state['target_code']
         model = get_model(api_key)
@@ -328,14 +327,12 @@ elif mode == "🔍 個別詳細分析":
                 chg = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
                 name = info.get('longName', code)
                 
-                # 企業情報
                 st.sidebar.subheader("🏢 企業情報")
                 sector = safe_get(info, ['sector'], '不明')
                 st.sidebar.write(f"**業種**: {sector}")
                 website = safe_get(info, ['website'])
                 if website: st.sidebar.link_button("🌐 公式サイトを見る", website)
 
-                # 履歴保存
                 st.session_state['history'][code] = {
                     'name': name, 'timestamp': now_str, 'price': price, 'oneil': oneil, 'graham': graham
                 }
