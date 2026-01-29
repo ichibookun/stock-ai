@@ -26,7 +26,7 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 5.0: Tech & Earnings")
+st.sidebar.info("Ver 5.1: Stable Edition")
 
 # --- 分析関数群 ---
 
@@ -41,14 +41,16 @@ def calculate_technicals(hist):
     prev = hist.iloc[-2]
     
     cross_status = "なし"
-    if prev['SMA5'] < prev['SMA25'] and latest['SMA5'] > latest['SMA25']:
-        cross_status = "ゴールデンクロス (短期)"
-    elif prev['SMA25'] < prev['SMA75'] and latest['SMA25'] > latest['SMA75']:
-        cross_status = "ゴールデンクロス (長期)"
-    elif prev['SMA5'] > prev['SMA25'] and latest['SMA5'] < latest['SMA25']:
-        cross_status = "デッドクロス (短期)"
-    elif prev['SMA25'] > prev['SMA75'] and latest['SMA25'] < latest['SMA75']:
-        cross_status = "デッドクロス (長期)"
+    # データが十分あるか確認してから判定
+    if pd.notna(prev['SMA5']) and pd.notna(prev['SMA25']):
+        if prev['SMA5'] < prev['SMA25'] and latest['SMA5'] > latest['SMA25']:
+            cross_status = "ゴールデンクロス (短期)"
+        elif prev['SMA25'] < prev['SMA75'] and latest['SMA25'] > latest['SMA75']:
+            cross_status = "ゴールデンクロス (長期)"
+        elif prev['SMA5'] > prev['SMA25'] and latest['SMA5'] < latest['SMA25']:
+            cross_status = "デッドクロス (短期)"
+        elif prev['SMA25'] > prev['SMA75'] and latest['SMA25'] < latest['SMA75']:
+            cross_status = "デッドクロス (長期)"
 
     # 一目均衡表 (簡易計算)
     high9 = hist['High'].rolling(window=9).max()
@@ -69,7 +71,7 @@ def calculate_technicals(hist):
     current_span_b = span_b.iloc[-1]
     
     if pd.isna(current_span_a) or pd.isna(current_span_b):
-        kumo_status = "計算データ不足"
+        kumo_status = "データ不足"
     elif current_price > max(current_span_a, current_span_b):
         kumo_status = "雲上抜け (強気)"
     elif current_price < min(current_span_a, current_span_b):
@@ -80,22 +82,22 @@ def calculate_technicals(hist):
 def get_news_deep_dive(code, name):
     ddgs = DDGS()
     news_text = ""
-    
-    # 1. 決算・業績ニュース
     try:
         results = ddgs.text(f"{code} {name} 決算 コンセンサス 上方修正", region='jp-jp', timelimit='w', max_results=5)
-        news_text += "【決算・業績ニュース】\n"
-        for r in results:
-            news_text += f"- {r['title']} ({r['body'][:50]}...)\n"
+        if results:
+            news_text += "【決算・業績ニュース】\n"
+            for r in results:
+                news_text += f"- {r['title']} ({r['body'][:50]}...)\n"
     except: pass
     
-    # 2. 一般ニュース
-    try:
-        results = ddgs.text(f"{code} {name} 株価 材料", region='jp-jp', timelimit='w', max_results=3)
-        news_text += "\n【市場の材料】\n"
-        for r in results:
-            news_text += f"- {r['title']}\n"
-    except: pass
+    if not news_text:
+        try:
+            results = ddgs.text(f"{code} {name} 株価 材料", region='jp-jp', timelimit='w', max_results=3)
+            if results:
+                news_text += "\n【市場の材料】\n"
+                for r in results:
+                    news_text += f"- {r['title']}\n"
+        except: pass
     
     return news_text if news_text else "特になし"
 
@@ -115,7 +117,6 @@ if st.button("🔍 プロ分析開始", type="primary"):
     elif not query:
         st.warning("銘柄を入力してください")
     else:
-        # コード特定処理
         target_code = None
         if re.fullmatch(r'\d{4}', query.strip()):
             target_code = query.strip()
@@ -123,9 +124,11 @@ if st.button("🔍 プロ分析開始", type="primary"):
             with st.spinner("銘柄コード検索中..."):
                 model = get_model(api_key)
                 if model:
-                    resp = model.generate_content(f"日本株「{query}」の銘柄コード(4桁)のみを返して。")
-                    match = re.search(r'\d{4}', resp.text)
-                    if match: target_code = match.group(0)
+                    try:
+                        resp = model.generate_content(f"日本株「{query}」の銘柄コード(4桁)のみを返して。")
+                        match = re.search(r'\d{4}', resp.text)
+                        if match: target_code = match.group(0)
+                    except: pass
         
         if target_code:
             st.session_state['target_code'] = target_code
@@ -139,62 +142,97 @@ if st.session_state['target_code']:
     model = get_model(api_key)
     
     with st.spinner(f"コード【{code}】のテクニカル＆決算を徹底調査中..."):
-        # データ取得
-        ticker = yf.Ticker(f"{code}.T")
-        hist = ticker.history(period="1y") # 1年分取得（雲の計算のため）
-        info = ticker.info
-        
-        if hist.empty:
-            st.error("データが取得できませんでした")
-        else:
-            # テクニカル計算
-            hist, cross_stat, kumo_stat, tenkan, kijun = calculate_technicals(hist)
+        try:
+            # データ取得
+            ticker = yf.Ticker(f"{code}.T")
+            hist = ticker.history(period="2y") # 期間を長めに確保
+            info = ticker.info
             
-            # 直近データ
-            latest = hist.iloc[-1]
-            price = latest['Close']
-            prev_close = hist.iloc[-2]['Close']
-            change = price - prev_close
-            change_pct = (change / prev_close) * 100
-            
-            # ニュース収集（決算重視）
-            name = info.get('longName', code)
-            news = get_news_deep_dive(code, name)
-            
-            # --- 表示セクション ---
-            st.header(f"{name} ({code})")
-            
-            # メトリクス
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("株価", f"{price:,.0f}円", f"{change:+.0f}円 ({change_pct:+.2f}%)")
-            c2.metric("MAクロス判定", cross_stat, delta_color="off")
-            c3.metric("一目均衡表", kumo_stat, delta_color="off")
-            c4.metric("PER / PBR", f"{info.get('trailingPE','-'):.1f}倍 / {info.get('priceToBook','-'):.2f}倍")
+            if hist.empty:
+                st.error("株価データが取得できませんでした。")
+            else:
+                # テクニカル計算
+                hist, cross_stat, kumo_stat, tenkan, kijun = calculate_technicals(hist)
+                
+                # 直近データ
+                latest = hist.iloc[-1]
+                price = latest['Close']
+                prev_close = hist.iloc[-2]['Close']
+                change = price - prev_close
+                change_pct = (change / prev_close) * 100
+                
+                # ニュース収集
+                name = info.get('longName', code)
+                news = get_news_deep_dive(code, name)
+                
+                # --- 表示セクション ---
+                st.header(f"{name} ({code})")
+                
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("株価", f"{price:,.0f}円", f"{change:+.0f}円 ({change_pct:+.2f}%)")
+                c2.metric("MAクロス判定", cross_stat, delta_color="off")
+                c3.metric("一目均衡表", kumo_stat, delta_color="off")
+                val_per = info.get('trailingPE')
+                val_pbr = info.get('priceToBook')
+                c4.metric("PER / PBR", f"{val_per:.1f}倍" if val_per else "-", f"{val_pbr:.2f}倍" if val_pbr else "-")
 
-            # --- チャート (TradingView風 + MA) ---
-            st.subheader("📈 テクニカルチャート")
-            
-            # 表示期間を直近6ヶ月に絞る
-            display_hist = hist.tail(120) 
-            
-            fig = go.Figure()
-            # ローソク足
-            fig.add_trace(go.Candlestick(
-                x=display_hist.index,
-                open=display_hist['Open'], high=display_hist['High'],
-                low=display_hist['Low'], close=display_hist['Close'],
-                name="株価"
-            ))
-            # 移動平均線
-            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1), name="25日線"))
-            fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1), name="75日線"))
-            
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+                # --- チャート ---
+                st.subheader("📈 テクニカルチャート")
+                display_hist = hist.tail(120) 
+                
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=display_hist.index,
+                    open=display_hist['Open'], high=display_hist['High'],
+                    low=display_hist['Low'], close=display_hist['Close'],
+                    name="株価"
+                ))
+                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA25'], line=dict(color='orange', width=1), name="25日線"))
+                fig.add_trace(go.Scatter(x=display_hist.index, y=display_hist['SMA75'], line=dict(color='skyblue', width=1), name="75日線"))
+                
+                fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
+                st.plotly_chart(fig, use_container_width=True)
 
-            # --- AIプロ分析レポート ---
-            st.divider()
-            st.subheader("📝 プロ・アナリストレポート")
-            
-            # 形状分析用の価格データ文字列作成
-            price_seq
+                # --- AIプロ分析レポート ---
+                st.divider()
+                st.subheader("📝 プロ・アナリストレポート")
+                
+                # 形状分析用のデータ作成
+                price_seq = display_hist['Close'].tail(30).tolist()
+                price_seq_str = ",".join([str(int(x)) for x in price_seq])
+                
+                today = datetime.date.today().strftime("%Y年%m月%d日")
+
+                prompt = f"""
+                あなたは機関投資家のシニアアナリストです。
+                今日は「{today}」です。
+                
+                【銘柄】{name} ({code})
+                【現在値】{price:.0f}円 (前日比 {change_pct:+.2f}%)
+                
+                【テクニカル分析データ】
+                1. 移動平均線判定: {cross_stat}
+                2. 一目均衡表（雲）: {kumo_stat} (転換線:{tenkan:.0f}, 基準線:{kijun:.0f})
+                3. 直近30日の価格推移: [{price_seq_str}]
+                
+                【最新ニュース・決算情報】
+                {news}
+
+                【指示】
+                以下の構成で辛口に分析してください。
+                1. **決算・ファンダメンタルズ評価**:
+                   市場コンセンサスと比較し、織り込み済みかサプライズかを分析。
+                2. **テクニカル詳細分析**:
+                   移動平均線や雲の状態、チャートパターン（ダブルトップ等）の兆候を推測して解説。
+                3. **売買シナリオ**:
+                   具体的なエントリーポイントと損切りラインを提示。
+                """
+                
+                try:
+                    resp = model.generate_content(prompt)
+                    st.markdown(resp.text)
+                except Exception as e:
+                    st.error(f"AIレポート生成エラー: {e}")
+
+        except Exception as e:
+            st.error(f"予期せぬエラーが発生しました: {e}")
