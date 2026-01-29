@@ -36,28 +36,37 @@ if 'target_code' not in st.session_state: st.session_state['target_code'] = None
 
 # --- サイドバー ---
 st.sidebar.title("🦅 Deep Dive Pro")
+mode = st.sidebar.selectbox("モード選択", ["🔍 個別詳細分析", "💎 お宝発掘 (スクリーニング)"])
+
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
     st.sidebar.success("🔑 API認証済み")
 else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
-st.sidebar.markdown("---")
-st.sidebar.info("Ver 9.0: Financial Visuals")
 
-# 履歴表示
-history = st.session_state['history']
-if history:
-    sorted_codes = sorted(history.keys(), key=lambda x: history[x].get('timestamp', ''), reverse=True)
-    st.sidebar.subheader("🕒 最近の履歴")
-    for c in sorted_codes[:5]:
-        d = history[c]
-        if st.sidebar.button(f"{d['name']} ({c})", key=f"h_{c}"):
-            st.session_state['target_code'] = c
+st.sidebar.markdown("---")
+st.sidebar.info("Ver 11.0: Market Hunter")
+
+# チャート設定 (個別分析用)
+if mode == "🔍 個別詳細分析":
+    st.sidebar.subheader("🎨 チャート設定")
+    show_bollinger = st.sidebar.checkbox("ボリンジャーバンド", value=True)
+    show_ichimoku = st.sidebar.checkbox("一目均衡表", value=True)
+
+    # 履歴表示
+    history = st.session_state['history']
+    if history:
+        sorted_codes = sorted(history.keys(), key=lambda x: history[x].get('timestamp', ''), reverse=True)
+        st.sidebar.subheader("🕒 最近の履歴")
+        for c in sorted_codes[:5]:
+            d = history[c]
+            if st.sidebar.button(f"{d['name']} ({c})", key=f"h_{c}"):
+                st.session_state['target_code'] = c
+                st.rerun()
+        if st.sidebar.button("履歴クリア"):
+            if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+            st.session_state['history'] = {}
             st.rerun()
-    if st.sidebar.button("履歴クリア"):
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
-        st.session_state['history'] = {}
-        st.rerun()
 
 # --- 関数群 ---
 def get_model(key):
@@ -76,6 +85,7 @@ def safe_get(info, keys, default=None):
     return default
 
 def calculate_scores(hist, info):
+    if hist.empty: return 0, 0, 50
     latest = hist.iloc[-1]
     price = latest['Close']
     
@@ -130,16 +140,13 @@ def calculate_technicals(hist):
     hist['SMA25'] = hist['Close'].rolling(25).mean()
     hist['SMA75'] = hist['Close'].rolling(75).mean()
     
-    curr = hist.iloc[-1]
-    prev = hist.iloc[-2]
-    
-    cross = "特になし"
-    if pd.notna(prev['SMA5']) and pd.notna(prev['SMA25']):
-        if prev['SMA5'] < prev['SMA25'] and curr['SMA5'] > curr['SMA25']: cross = "ゴールデンクロス (短期)"
-        elif prev['SMA25'] < prev['SMA75'] and curr['SMA25'] > curr['SMA75']: cross = "ゴールデンクロス (長期)"
-        elif prev['SMA5'] > prev['SMA25'] and curr['SMA5'] < curr['SMA25']: cross = "デッドクロス (短期)"
-        elif prev['SMA25'] > prev['SMA75'] and curr['SMA25'] < curr['SMA75']: cross = "デッドクロス (長期)"
+    # Bollinger
+    hist['std20'] = hist['Close'].rolling(20).std()
+    hist['SMA20'] = hist['Close'].rolling(20).mean()
+    hist['Upper'] = hist['SMA20'] + (hist['std20'] * 2)
+    hist['Lower'] = hist['SMA20'] - (hist['std20'] * 2)
 
+    # Ichimoku
     h9 = hist['High'].rolling(9).max(); l9 = hist['Low'].rolling(9).min()
     tenkan = (h9 + l9) / 2
     h26 = hist['High'].rolling(26).max(); l26 = hist['Low'].rolling(26).min()
@@ -147,12 +154,21 @@ def calculate_technicals(hist):
     hist['SpanA'] = ((tenkan + kijun) / 2).shift(26)
     hist['SpanB'] = ((hist['High'].rolling(52).max() + hist['Low'].rolling(52).min()) / 2).shift(26)
     
-    kumo = "雲の中"
+    curr = hist.iloc[-1]
+    prev = hist.iloc[-2]
+    cross = "なし"
+    if pd.notna(prev['SMA5']) and pd.notna(prev['SMA25']):
+        if prev['SMA5'] < prev['SMA25'] and curr['SMA5'] > curr['SMA25']: cross = "Gクロス(短)"
+        elif prev['SMA25'] < prev['SMA75'] and curr['SMA25'] > curr['SMA75']: cross = "Gクロス(長)"
+        elif prev['SMA5'] > prev['SMA25'] and curr['SMA5'] < curr['SMA25']: cross = "Dクロス(短)"
+        elif prev['SMA25'] > prev['SMA75'] and curr['SMA25'] < curr['SMA75']: cross = "Dクロス(長)"
+    
+    kumo = "雲中"
     sa, sb = hist['SpanA'].iloc[-1], hist['SpanB'].iloc[-1]
     cp = curr['Close']
     if pd.notna(sa) and pd.notna(sb):
-        if cp > max(sa, sb): kumo = "雲上抜け (強気)"
-        elif cp < min(sa, sb): kumo = "雲下抜け (弱気)"
+        if cp > max(sa, sb): kumo = "雲上抜け"
+        elif cp < min(sa, sb): kumo = "雲下抜け"
         
     return hist, cross, kumo
 
@@ -178,137 +194,220 @@ def get_news(code, name):
         except: pass
     return txt if txt else "直近の重要ニュースなし"
 
-# --- UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 9.0)")
+# --- メイン UI ---
+st.title("🦅 Deep Dive Investing AI Pro (Ver 11.0)")
 
-with st.form('search'):
-    q = st.text_input("銘柄コード/名", placeholder="例: 6758 (エンターで実行)")
-    submitted = st.form_submit_button("🔍 分析開始", type="primary")
-
-if submitted:
-    if not api_key: st.error("APIキーが必要です"); st.stop()
-    if not q: st.warning("入力を確認してください"); st.stop()
+# ==========================================
+# モード1: 💎 お宝発掘 (スクリーニング)
+# ==========================================
+if mode == "💎 お宝発掘 (スクリーニング)":
+    st.header("💎 お宝銘柄ハンター")
+    st.markdown("複数の銘柄を一括分析し、**スコア80点以上**の有望株を発掘します。")
     
-    tgt = None
-    if re.fullmatch(r'\d{4}', q.strip()): tgt = q.strip()
-    else:
-        with st.spinner("銘柄特定中..."):
-            model = get_model(api_key)
-            if model:
-                try:
-                    resp = model.generate_content(f"日本株「{q}」のコード(4桁)のみ。")
-                    m = re.search(r'\d{4}', resp.text)
-                    if m: tgt = m.group(0)
-                except: pass
-    if tgt: st.session_state['target_code'] = tgt
-    else: st.error("銘柄が見つかりませんでした")
+    # プリセットボタン
+    col_p1, col_p2, col_p3 = st.columns(3)
+    preset_codes = ""
+    if col_p1.button("🇯🇵 日経平均・人気10選"):
+        preset_codes = "7203, 6758, 9984, 8035, 6861, 6098, 4063, 6902, 7974, 9432"
+    if col_p2.button("💰 高配当・バリュー10選"):
+        preset_codes = "8306, 8316, 2914, 8058, 8001, 8002, 9433, 9434, 4503, 5401"
+    if col_p3.button("🚀 半導体・ハイテク10選"):
+        preset_codes = "8035, 6146, 6920, 6723, 6857, 7729, 6963, 6526, 6702, 6752"
 
-# --- メイン処理 ---
-if st.session_state['target_code']:
-    code = st.session_state['target_code']
-    model = get_model(api_key)
-    now_str = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
+    with st.form("screener_form"):
+        input_codes = st.text_area("銘柄コードを入力 (カンマ区切り)", value=preset_codes, placeholder="例: 6758, 7203, 9984")
+        scan_btn = st.form_submit_button("🛡️ 一括スキャン開始", type="primary")
     
-    with st.spinner(f"コード【{code}】を分析中..."):
-        try:
-            tk = yf.Ticker(f"{code}.T")
-            hist = tk.history(period="2y")
-            info = tk.info
+    if scan_btn and input_codes:
+        codes = [c.strip() for c in input_codes.replace("、", ",").split(",") if c.strip()]
+        results = []
+        progress = st.progress(0)
+        
+        for i, c in enumerate(codes):
+            try:
+                # 4桁コードのみ処理
+                if re.match(r'\d{4}', c):
+                    tk = yf.Ticker(f"{c}.T")
+                    hist = tk.history(period="1y")
+                    if not hist.empty:
+                        info = tk.info
+                        o_score, g_score, rsi = calculate_scores(hist, info)
+                        hist, cross, kumo = calculate_technicals(hist)
+                        
+                        name = info.get('longName', c)
+                        price = hist['Close'].iloc[-1]
+                        
+                        # 判定
+                        judge = ""
+                        if o_score >= 80: judge += "🏆成長株 "
+                        if g_score >= 80: judge += "💎割安株 "
+                        
+                        results.append({
+                            "コード": c,
+                            "銘柄名": name,
+                            "株価": f"{price:,.0f}円",
+                            "成長(オニール)": o_score,
+                            "割安(グレアム)": g_score,
+                            "RSI": round(rsi, 1),
+                            "MA判定": cross,
+                            "一目": kumo,
+                            "有望度": judge
+                        })
+                time.sleep(0.5) # 負荷軽減
+                progress.progress((i + 1) / len(codes))
+            except: pass
             
-            if hist.empty: st.error("データ取得失敗"); st.stop()
+        progress.empty()
+        
+        if results:
+            df = pd.DataFrame(results)
+            # スコア順にソート
+            df = df.sort_values(by=["成長(オニール)", "割安(グレアム)"], ascending=False)
             
-            hist, cross, kumo = calculate_technicals(hist)
-            oneil, graham, rsi = calculate_scores(hist, info)
-            latest = hist.iloc[-1]
-            price = latest['Close']
-            chg = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
-            name = info.get('longName', code)
-            
-            # 履歴保存
-            st.session_state['history'][code] = {
-                'name': name, 'timestamp': now_str, 'price': price, 'oneil': oneil, 'graham': graham
-            }
-            save_history(st.session_state['history'])
-            
-            st.header(f"{name} ({code})")
-            
-            # タブ機能の実装
-            tab1, tab2, tab3 = st.tabs(["📝 分析レポート", "📈 詳細チャート", "📊 業績・財務"])
-            
-            # --- Tab 1: メインレポート ---
-            with tab1:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("株価", f"{price:,.0f}円", f"{chg:+.2f}%")
-                c2.metric("RSI", f"{rsi:.1f}")
-                c3.metric("成長スコア", f"{oneil}点")
-                c4.metric("割安スコア", f"{graham}点")
+            # ハイライト表示 (80点以上)
+            def highlight_high_score(s):
+                is_high = s >= 80
+                return ['background-color: #334433' if v else '' for v in is_high]
+
+            st.success(f"{len(results)}銘柄の分析が完了しました！")
+            st.dataframe(
+                df.style.apply(highlight_high_score, subset=["成長(オニール)", "割安(グレアム)"]),
+                use_container_width=True,
+                height=400
+            )
+            st.info("※成長スコアまたは割安スコアが **80点以上** のセルは緑色で強調されます。")
+        else:
+            st.error("データが取得できませんでした。コードを確認してください。")
+
+
+# ==========================================
+# モード2: 🔍 個別詳細分析 (従来の画面)
+# ==========================================
+elif mode == "🔍 個別詳細分析":
+    with st.form('search'):
+        q = st.text_input("銘柄コード/名", placeholder="例: 6758 (エンターで実行)")
+        submitted = st.form_submit_button("🔍 分析開始", type="primary")
+
+    if submitted:
+        if not api_key: st.error("APIキーが必要です"); st.stop()
+        if not q: st.warning("入力を確認してください"); st.stop()
+        
+        tgt = None
+        if re.fullmatch(r'\d{4}', q.strip()): tgt = q.strip()
+        else:
+            with st.spinner("銘柄特定中..."):
+                model = get_model(api_key)
+                if model:
+                    try:
+                        resp = model.generate_content(f"日本株「{q}」のコード(4桁)のみ。")
+                        m = re.search(r'\d{4}', resp.text)
+                        if m: tgt = m.group(0)
+                    except: pass
+        if tgt: st.session_state['target_code'] = tgt
+        else: st.error("銘柄が見つかりませんでした")
+
+    # 個別分析実行
+    if st.session_state['target_code']:
+        code = st.session_state['target_code']
+        model = get_model(api_key)
+        now_str = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
+        
+        with st.spinner(f"コード【{code}】を分析中..."):
+            try:
+                tk = yf.Ticker(f"{code}.T")
+                hist = tk.history(period="2y")
+                info = tk.info
+                if hist.empty: st.error("データ取得失敗"); st.stop()
                 
-                # AI分析エリア
-                st.subheader("🤖 AIアナリストの見解")
-                try:
-                    news = get_news(code, name)
-                    prompt = f"""
-                    あなたはプロの機関投資家。現在日時「{now_str}」。
-                    銘柄: {name} ({code}), 株価: {price}円
-                    ニュース: {news}
-                    スコア: 成長{oneil}, 割安{graham}
-                    指示: 最新決算（あれば）の評価、スコア背景、売買戦略を簡潔かつ具体的に。
-                    """
-                    if model:
-                        try:
-                            resp = model.generate_content(prompt)
-                            st.markdown(resp.text)
-                        except Exception as e:
-                            st.warning("⚠️ AIは休憩中ですが、他のデータは正常です！")
-                            st.error(f"API制限: {e}")
-                    else: st.warning("AI接続不可")
-                except Exception as e: st.error(f"News Error: {e}")
+                hist, cross, kumo = calculate_technicals(hist)
+                oneil, graham, rsi = calculate_scores(hist, info)
+                latest = hist.iloc[-1]
+                price = latest['Close']
+                chg = ((price - hist.iloc[-2]['Close']) / hist.iloc[-2]['Close']) * 100
+                name = info.get('longName', code)
+                
+                # 企業情報
+                st.sidebar.subheader("🏢 企業情報")
+                sector = safe_get(info, ['sector'], '不明')
+                st.sidebar.write(f"**業種**: {sector}")
+                website = safe_get(info, ['website'])
+                if website: st.sidebar.link_button("🌐 公式サイトを見る", website)
 
-            # --- Tab 2: チャート ---
-            with tab2:
-                st.info(f"テクニカル判定: {cross} / {kumo}")
-                d_hist = hist.tail(150)
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0,200,200,0.2)'))
-                fig.add_trace(go.Candlestick(x=d_hist.index, open=d_hist['Open'], high=d_hist['High'], low=d_hist['Low'], close=d_hist['Close'], name='株価'))
-                fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA25'], line=dict(color='orange'), name='25MA'))
-                fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA75'], line=dict(color='skyblue'), name='75MA'))
-                fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
-                st.plotly_chart(fig, use_container_width=True)
+                # 履歴保存
+                st.session_state['history'][code] = {
+                    'name': name, 'timestamp': now_str, 'price': price, 'oneil': oneil, 'graham': graham
+                }
+                save_history(st.session_state['history'])
+                
+                st.header(f"{name} ({code})")
+                
+                tab1, tab2, tab3 = st.tabs(["📝 分析レポート", "📈 詳細チャート", "📊 業績・財務"])
+                
+                with tab1:
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("株価", f"{price:,.0f}円", f"{chg:+.2f}%")
+                    c2.metric("RSI", f"{rsi:.1f}")
+                    c3.metric("成長スコア", f"{oneil}点")
+                    c4.metric("割安スコア", f"{graham}点")
+                    
+                    st.subheader("🤖 AIアナリストの見解")
+                    try:
+                        news = get_news(code, name)
+                        prompt = f"""
+                        あなたはプロの機関投資家。現在日時「{now_str}」。
+                        銘柄: {name} ({code}), 株価: {price}円
+                        ニュース: {news}
+                        スコア: 成長{oneil}, 割安{graham}
+                        指示: 最新決算（あれば）の評価、スコア背景、売買戦略を簡潔かつ具体的に。
+                        """
+                        if model:
+                            try:
+                                resp = model.generate_content(prompt)
+                                st.markdown(resp.text)
+                            except Exception as e:
+                                st.warning("⚠️ AIは休憩中ですが、他のデータは正常です！")
+                                st.error(f"API制限: {e}")
+                        else: st.warning("AI接続不可")
+                    except Exception as e: st.error(f"News Error: {e}")
 
-            # --- Tab 3: 業績・財務 (New!) ---
-            with tab3:
-                st.subheader("💰 業績推移 (AI不要)")
-                try:
-                    # 財務データの取得
-                    fin = tk.financials
-                    if fin is not None and not fin.empty:
-                        # データ整理 (転置して日付を列に)
-                        fin = fin.T.sort_index()
-                        # 最新3期分
-                        fin_recent = fin.tail(4)
-                        
-                        # グラフ描画
-                        fig_fin = go.Figure()
-                        if 'Total Revenue' in fin.columns:
-                            fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Total Revenue'], name='売上高', marker_color='#4ecdc4'))
-                        elif 'Total Revenue' not in fin.columns and 'Revenue' in fin.columns: # 表記揺れ対応
-                             fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Revenue'], name='売上高', marker_color='#4ecdc4'))
+                with tab2:
+                    st.info(f"テクニカル判定: {cross} / {kumo}")
+                    d_hist = hist.tail(150)
+                    fig = go.Figure()
+                    if show_ichimoku:
+                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanA'], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SpanB'], line=dict(width=0), name='雲', fill='tonexty', fillcolor='rgba(0,200,200,0.2)'))
+                    if show_bollinger:
+                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['Upper'], line=dict(width=1, color='gray', dash='dot'), name='+2σ'))
+                        fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['Lower'], line=dict(width=1, color='gray', dash='dot'), name='-2σ', fill='tonexty', fillcolor='rgba(128,128,128,0.1)'))
 
-                        if 'Net Income' in fin.columns:
-                            fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Net Income'], name='純利益', marker_color='#ff6b6b'))
-                        
-                        fig_fin.update_layout(title="売上高と純利益の推移 (年次)", barmode='group', template="plotly_dark", height=400)
-                        st.plotly_chart(fig_fin, use_container_width=True)
-                        
-                        # データテーブル表示
-                        st.write("📊 **詳細データ (単位: 円)**")
-                        st.dataframe(fin[['Total Revenue', 'Net Income']].style.format("{:,.0f}") if 'Total Revenue' in fin.columns else fin)
-                    else:
-                        st.info("詳細な財務データが取得できませんでした。")
-                except Exception as e:
-                    st.error(f"財務データエラー: {e}")
+                    fig.add_trace(go.Candlestick(x=d_hist.index, open=d_hist['Open'], high=d_hist['High'], low=d_hist['Low'], close=d_hist['Close'], name='株価'))
+                    fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA25'], line=dict(color='orange'), name='25MA'))
+                    fig.add_trace(go.Scatter(x=d_hist.index, y=d_hist['SMA75'], line=dict(color='skyblue'), name='75MA'))
+                    fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_dark")
+                    st.plotly_chart(fig, use_container_width=True)
 
-        except Exception as e:
-            st.error(f"データ取得エラー: {e}")
+                with tab3:
+                    st.subheader("💰 業績データ")
+                    try:
+                        fin = tk.financials
+                        if fin is not None and not fin.empty:
+                            fin = fin.T.sort_index()
+                            fin_recent = fin.tail(4)
+                            fig_fin = go.Figure()
+                            if 'Total Revenue' in fin.columns:
+                                fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Total Revenue'], name='売上高', marker_color='#4ecdc4'))
+                            elif 'Revenue' in fin.columns:
+                                 fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Revenue'], name='売上高', marker_color='#4ecdc4'))
+                            if 'Net Income' in fin.columns:
+                                fig_fin.add_trace(go.Bar(x=fin_recent.index, y=fin_recent['Net Income'], name='純利益', marker_color='#ff6b6b'))
+                            fig_fin.update_layout(title="売上高と純利益 (年次)", barmode='group', template="plotly_dark", height=400)
+                            st.plotly_chart(fig_fin, use_container_width=True)
+                            
+                            csv = hist.to_csv().encode('utf-8')
+                            st.download_button(label="📥 株価CSVダウンロード", data=csv, file_name=f"{code}_data.csv", mime='text/csv')
+                        else:
+                            st.info("財務データなし")
+                    except Exception as e: st.error(f"Financial Error: {e}")
+
+            except Exception as e: st.error(f"データ取得エラー: {e}")
