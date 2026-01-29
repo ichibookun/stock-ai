@@ -13,15 +13,23 @@ import re
 st.set_page_config(page_title="Deep Dive Investing AI", layout="wide")
 mpl.rcParams['font.family'] = 'IPAexGothic'
 
+# --- セッション状態の初期化 ---
+if 'candidates' not in st.session_state:
+    st.session_state['candidates'] = None
+if 'target_code' not in st.session_state:
+    st.session_state['target_code'] = None
+
 # --- サイドバー：設定 ---
 st.sidebar.title("🛠 設定パネル")
 
-# APIキーの自動読み込み設定
+# SecretsからAPIキーを読み込む (なければ入力欄を表示)
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
-    st.sidebar.success("APIキー認証済み")
+    st.sidebar.success("🔑 APIキー認証済み")
 else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
+    st.sidebar.warning("APIキーが設定されていません")
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("Created by Deep Dive Investing Project")
 
@@ -54,6 +62,28 @@ def get_stock_news(keyword, limit=3):
     except:
         pass
     return "\n".join(news_list) if news_list else "(直近ニュースなし)"
+
+def search_stock_candidates(model, query):
+    prompt = f"""
+    ユーザーは日本株の銘柄を探しています。検索ワード:「{query}」
+    このワードに関連する可能性が高い日本株銘柄を最大3つ挙げてください。
+    出力形式は必ず「コード 銘柄名」のリストのみにしてください。
+    例:
+    7203 トヨタ自動車
+    7267 ホンダ
+    """
+    try:
+        resp = model.generate_content(prompt)
+        lines = resp.text.strip().split('\n')
+        candidates = []
+        for line in lines:
+            # 4桁の数字を含む行を抽出
+            match = re.search(r'(\d{4})\s*(.*)', line)
+            if match:
+                candidates.append(f"{match.group(1)} {match.group(2)}")
+        return candidates[:3]
+    except:
+        return []
 
 def get_full_data(ticker, manual_name=None):
     code = f"{ticker}.T"
@@ -112,99 +142,133 @@ def get_full_data(ticker, manual_name=None):
         return None
 
 # --- メインUI ---
-col1, col2 = st.columns(2)
-with col1:
-    main_code = st.text_input("銘柄コード (例: 6758)", "6758")
-with col2:
-    main_name_input = st.text_input("銘柄名 (任意: ソニー)", "")
+st.markdown("##### 銘柄コード、または企業名を入力してください")
+input_query = st.text_input("検索", placeholder="例: 7203 または トヨタ", value="")
 
-rival_input = st.text_input("ライバル銘柄 (空欄でAI自動選定)", "")
+# 検索ボタン
+if st.button("🔍 検索・分析開始", type="primary"):
+    st.session_state['candidates'] = None # リセット
+    st.session_state['target_code'] = None
 
-if st.button("🚀 分析開始", type="primary"):
     if not api_key:
-        st.error("左のサイドバーからAPIキーを入力してください！")
+        st.error("APIキーが設定されていません。")
+    elif not input_query:
+        st.warning("何か入力してください。")
     else:
-        model = get_model(api_key)
-        if not model:
-            st.error("APIキーが間違っているか、モデルに接続できません。")
+        # 数字4桁ならそのままコードとして扱う
+        if re.fullmatch(r'\d{4}', input_query.strip()):
+            st.session_state['target_code'] = input_query.strip()
         else:
-            with st.spinner('AIが市場データをスキャン中...'):
-                tickers = [main_code]
-                if rival_input:
-                    tickers += [t.strip() for t in rival_input.split(',')]
-                else:
-                    try:
-                        resp = model.generate_content(f"日本株銘柄「{main_code}」の競合2社のコード(4桁)のみ出力。例: 8035, 6857")
-                        found = re.findall(r'\d{4}', resp.text)
-                        found = [c for c in found if c != main_code][:2]
-                        tickers += found
-                        if found: st.info(f"🤖 AIが選定したライバル: {', '.join(found)}")
-                    except: pass
-                
-                data_list = []
-                main_d = get_full_data(main_code, main_name_input)
-                if main_d: data_list.append(main_d)
-                for t in tickers[1:]:
-                    d = get_full_data(t)
-                    if d: data_list.append(d)
-                    time.sleep(1)
-                
-                if not data_list:
-                    st.error("データの取得に失敗しました。コードを確認してください。")
-                else:
-                    main_data = data_list[0]
-                    
-                    # --- ダッシュボード ---
-                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                    m_col1.metric("現在値", f"{main_data['Price']:.0f}円")
-                    m_col2.metric("RSI", f"{main_data['RSI']:.1f}")
-                    m_col3.metric("順張りスコア", f"{main_data['Oneil_Score']}点")
-                    m_col4.metric("逆張りスコア", f"{main_data['Graham_Score']}点")
-                    
-                    c_col1, c_col2 = st.columns([2, 1])
-                    with c_col1:
-                        st.subheader("📈 パフォーマンス比較")
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        for d in data_list:
-                            norm = (d['Hist'] / d['Hist'].iloc[0] - 1) * 100
-                            ax.plot(norm.index, norm, label=d['Name'])
-                        ax.legend()
-                        ax.grid(True, alpha=0.3)
-                        st.pyplot(fig)
-                    
-                    with c_col2:
-                        st.subheader("📊 AIスコア詳細")
-                        fig2, ax2 = plt.subplots(figsize=(5, 5))
-                        scores = [main_data['Oneil_Score'], main_data['Graham_Score']]
-                        labels = ['成長性', '割安性']
-                        colors = ['#ff6b6b', '#4ecdc4']
-                        bars = ax2.barh(labels, scores, color=colors)
-                        ax2.set_xlim(0, 100)
-                        ax2.grid(axis='x', linestyle='--')
-                        st.pyplot(fig2)
-                        
-                        judge = "様子見"
-                        if main_data['Oneil_Score'] >= 70: judge = "買い (成長)"
-                        elif main_data['Graham_Score'] >= 70: judge = "買い (割安)"
-                        st.info(f"判定: **{judge}**")
-                        st.write(f"損切: {main_data['Stop_Loss']:.0f}円")
+            # 名前ならAIで検索
+            with st.spinner(f"AIが「{input_query}」の銘柄を探しています..."):
+                model = get_model(api_key)
+                if model:
+                    candidates = search_stock_candidates(model, input_query)
+                    if candidates:
+                        st.session_state['candidates'] = candidates
+                    else:
+                        st.error("銘柄が見つかりませんでした。別の言葉で試してください。")
 
-                    st.divider()
-                    st.subheader("📝 AIストラテジスト・レポート")
+# 候補選択UI
+selected_candidate_code = None
+if st.session_state['candidates']:
+    st.success("以下の候補が見つかりました。分析する銘柄を選んでください。")
+    selection = st.radio("候補一覧", st.session_state['candidates'])
+    
+    if st.button("🚀 この銘柄で分析する"):
+        code_part = selection.split()[0]
+        st.session_state['target_code'] = code_part
+        st.session_state['candidates'] = None # 選択したら候補を消す
+        st.rerun() # 再読み込みして分析へ
+
+# 分析実行
+if st.session_state['target_code']:
+    main_code = st.session_state['target_code']
+    
+    # 競合設定（ここはシンプル化）
+    model = get_model(api_key)
+    if not model:
+        st.error("モデル接続エラー")
+    else:
+        with st.spinner(f'コード【{main_code}】を徹底分析中...'):
+            # 競合自動選定
+            tickers = [main_code]
+            try:
+                resp = model.generate_content(f"日本株コード「{main_code}」の強力なライバル2社のコード(4桁)のみ出力。")
+                found = re.findall(r'\d{4}', resp.text)
+                found = [c for c in found if c != main_code][:2]
+                tickers += found
+            except: pass
+            
+            data_list = []
+            for t in tickers:
+                d = get_full_data(t)
+                if d: data_list.append(d)
+                time.sleep(1)
+            
+            if not data_list:
+                st.error(f"データ取得失敗: {main_code}")
+            else:
+                main_data = data_list[0]
+                
+                # --- 結果表示 ---
+                st.subheader(f"📊 {main_data['Name']}")
+                
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                m_col1.metric("現在値", f"{main_data['Price']:.0f}円")
+                m_col2.metric("RSI", f"{main_data['RSI']:.1f}")
+                m_col3.metric("順張りスコア", f"{main_data['Oneil_Score']}点")
+                m_col4.metric("逆張りスコア", f"{main_data['Graham_Score']}点")
+                
+                c_col1, c_col2 = st.columns([2, 1])
+                with c_col1:
+                    st.subheader("📈 パフォーマンス比較")
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    for d in data_list:
+                        norm = (d['Hist'] / d['Hist'].iloc[0] - 1) * 100
+                        ax.plot(norm.index, norm, label=d['Name'])
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    st.pyplot(fig)
+                
+                with c_col2:
+                    st.subheader("🎯 投資判断")
+                    fig2, ax2 = plt.subplots(figsize=(5, 5))
+                    scores = [main_data['Oneil_Score'], main_data['Graham_Score']]
+                    labels = ['成長性', '割安性']
+                    colors = ['#ff6b6b', '#4ecdc4']
+                    ax2.barh(labels, scores, color=colors)
+                    ax2.set_xlim(0, 100)
+                    ax2.grid(axis='x', linestyle='--')
+                    st.pyplot(fig2)
                     
-                    clean_name = main_data['Name'].split('(')[0]
-                    news_text = get_stock_news(clean_name)
-                    
-                    prompt = f"""
-                    あなたはプロの投資家です。{main_data['Name']}のレポートを作成してください。
-                    【スコア】成長性:{main_data['Oneil_Score']}点, 割安性:{main_data['Graham_Score']}点
-                    【価格】現在:{main_data['Price']:.0f}円, 損切:{main_data['Stop_Loss']:.0f}円
-                    【ニュース】{news_text}
-                    マークダウン形式で、結論、スコア分析、戦略を簡潔に。
-                    """
-                    
-                    try:
-                        resp = model.generate_content(prompt)
-                        st.markdown(resp.text)
-                    except:
-                        st.error("AIレポート生成エラー")
+                    judge = "様子見"
+                    if main_data['Oneil_Score'] >= 70: judge = "買い (成長)"
+                    elif main_data['Graham_Score'] >= 70: judge = "買い (割安)"
+                    st.markdown(f"### 判定: **{judge}**")
+                    st.write(f"🛑 損切ライン: **{main_data['Stop_Loss']:.0f}円**")
+
+                st.divider()
+                st.subheader("📝 AIアナリスト・レポート")
+                
+                clean_name = main_data['Name'].split('(')[0]
+                news_text = get_stock_news(clean_name)
+                
+                prompt = f"""
+                あなたはプロの機関投資家です。{main_data['Name']}の詳細レポートを書いてください。
+                【データ】
+                価格:{main_data['Price']:.0f}円, PER:{main_data['PER']:.1f}, PBR:{main_data['PBR']:.2f}, 配当利回り:{main_data['Yield']:.2f}%
+                スコア: 成長性{main_data['Oneil_Score']}点, 割安性{main_data['Graham_Score']}点
+                ニュース: {news_text}
+                
+                【構成】
+                1. **結論**: 買うべきか、待つべきか（ズバリ一言で）
+                2. **良い点・懸念点**: ファンダメンタルズとテクニカルの両面から
+                3. **シナリオ**: どうなったら買いか、どこで逃げるか
+                """
+                
+                try:
+                    resp = model.generate_content(prompt)
+                    st.markdown(resp.text)
+                except:
+                    st.error("AIレポート生成エラー")
