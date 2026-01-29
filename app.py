@@ -37,12 +37,10 @@ if 'screener_codes' not in st.session_state: st.session_state['screener_codes'] 
 
 # --- サイドバー ---
 st.sidebar.title("🦅 Deep Dive Pro")
-
-# 【修正】keyを指定して重複エラーを防止
 mode = st.sidebar.radio(
     "モード選択", 
     ["🏠 市場ダッシュボード", "💎 お宝発掘 (一括採点)", "🔍 個別詳細分析"],
-    key="main_mode_select"
+    key="mode_selection_v12_4"
 )
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -52,7 +50,45 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 12.3: Clean Install")
+st.sidebar.info("Ver 12.4: Model Auto-Survival")
+
+# --- AIモデル接続機能 (超強化版) ---
+def get_model_and_name(key):
+    try:
+        genai.configure(api_key=key)
+        # 1. 利用可能な全モデルを取得
+        all_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        if not all_models:
+            return None, "利用可能なモデルなし"
+
+        # 2. 優先順位リスト (上から順に探す)
+        # 1.5-flash (無料枠大) -> 1.5-pro (性能良) -> 2.0/2.5 (最新だが制限きつい) -> その他
+        priority_keywords = ["1.5-flash", "1.5-pro", "2.0-flash", "flash"]
+        
+        target_model = None
+        
+        for keyword in priority_keywords:
+            # キーワードを含むモデルを探す
+            found = next((m for m in all_models if keyword in m.name), None)
+            if found:
+                target_model = found
+                break
+        
+        # 3. それでも無ければリストの先頭を使う
+        if not target_model:
+            target_model = all_models[0]
+
+        return genai.GenerativeModel(target_model.name), target_model.name
+    except Exception as e:
+        return None, str(e)
+
+# 接続テストと表示
+if api_key:
+    model, model_name = get_model_and_name(api_key)
+    if model:
+        st.sidebar.caption(f"🤖 Connected: {model_name}")
+    else:
+        st.sidebar.error("AI接続エラー")
 
 # 個別分析用設定
 if mode == "🔍 個別詳細分析":
@@ -76,23 +112,6 @@ if mode == "🔍 個別詳細分析":
             st.rerun()
 
 # --- 関数群 ---
-def get_model(key):
-    try:
-        genai.configure(api_key=key)
-        # 1. 利用可能なモデル名を取得
-        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 2. "1.5-flash" を含むモデルを優先的に探す
-        target_model = next((m for m in all_models if "1.5-flash" in m), None)
-        
-        # 3. なければ "gemini-pro" にする
-        if not target_model:
-            target_model = "models/gemini-pro"
-            
-        return genai.GenerativeModel(target_model)
-    except:
-        return None
-
 def safe_get(info, keys, default=None):
     for k in keys:
         if info.get(k) is not None: return info.get(k)
@@ -103,7 +122,6 @@ def calculate_scores(hist, info):
     latest = hist.iloc[-1]
     price = latest['Close']
     
-    # オニール
     oneil = 0
     high52 = safe_get(info, ['fiftyTwoWeekHigh'])
     if high52:
@@ -116,7 +134,6 @@ def calculate_scores(hist, info):
     sma25 = hist['Close'].rolling(25).mean().iloc[-1]
     if price > sma25: oneil += 30
     
-    # グレアム
     graham = 0
     eps = safe_get(info, ['forwardEps', 'trailingEps'])
     if eps and eps > 0:
@@ -202,7 +219,7 @@ def get_news(code, name):
     return txt if txt else "直近の重要ニュースなし"
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 12.3)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 12.4)")
 
 # ==========================================
 # モード0: 🏠 市場ダッシュボード
@@ -308,7 +325,7 @@ elif mode == "🔍 個別詳細分析":
         if re.fullmatch(r'\d{4}', q.strip()): tgt = q.strip()
         else:
             with st.spinner("銘柄特定中..."):
-                model = get_model(api_key)
+                model, _ = get_model_and_name(api_key)
                 if model:
                     try:
                         resp = model.generate_content(f"日本株「{q}」のコード(4桁)のみ。")
@@ -320,10 +337,10 @@ elif mode == "🔍 個別詳細分析":
 
     if st.session_state['target_code']:
         code = st.session_state['target_code']
-        model = get_model(api_key)
+        model, m_name = get_model_and_name(api_key) # ここで最適なモデル取得
         now_str = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
         
-        with st.spinner(f"コード【{code}】を分析中..."):
+        with st.spinner(f"コード【{code}】を分析中... (Model: {m_name})"):
             try:
                 tk = yf.Ticker(f"{code}.T"); hist = tk.history(period="2y"); info = tk.info
                 if hist.empty: st.error("データ取得失敗"); st.stop()
