@@ -1,138 +1,134 @@
-// ==============================
-// 新高値ブレイク判定ツール
-// 最終・簡易完成版
-// ==============================
+# ==============================
+# 新高値ブレイク判定ツール
+# Python 簡易完成版
+# ==============================
 
-const express = require("express");
-const app = express();
-app.use(express.json());
+from flask import Flask, request, jsonify
 
-// ------------------------------
-// 仮データ取得（ここをAPIに差し替える）
-// ------------------------------
-function fetchStockData(symbol) {
-  // symbol: 銘柄コード or 名前（今はダミー）
-  return {
-    symbol,
-    name: symbol.match(/^\d{4}$/) ? `銘柄${symbol}` : symbol,
-    close: 1020,
-    high52: 1050,
-    volume: 200000,
-    avgVolume: 100000,
-    ma25: 980,
-    ma75: 900,
-    epsGrowth: 35,
-    salesGrowth: 25,
-    roe: 18
-  };
-}
+app = Flask(__name__)
 
-// ------------------------------
-// 判定ロジック
-// ------------------------------
-function is52WeekHigh(stock) {
-  return stock.close >= stock.high52 * 0.97;
-}
-
-function volumeRatio(stock) {
-  return stock.volume / stock.avgVolume;
-}
-
-function isOverExtended(stock) {
-  return (stock.high52 - stock.close) / stock.high52 < 0.03;
-}
-
-// ------------------------------
-// スコア計算（超厳しめ）
-// ------------------------------
-function calcScore(stock) {
-  let score = 0;
-
-  if (is52WeekHigh(stock)) score += 30;
-  if (volumeRatio(stock) >= 1.5) score += 20;
-  if (stock.ma25 > stock.ma75) score += 10;
-  if (stock.epsGrowth >= 20) score += 20;
-  if (stock.salesGrowth >= 15) score += 20;
-
-  return score;
-}
-
-// ------------------------------
-// 行動判定
-// ------------------------------
-function judgeAction(stock) {
-  const vol = volumeRatio(stock);
-
-  if (vol >= 1.8 && isOverExtended(stock)) return "🟢 即買い";
-  if (vol < 1.8 && vol >= 1.2) return "🟡 押し目待ち";
-  return "⚪ 見送り";
-}
-
-// ------------------------------
-// 理由（日本語・端的）
-// ------------------------------
-function makeReason(stock, action) {
-  if (action === "🟢 即買い") {
-    return "52週高値を出来高を伴って更新しており、初動ブレイクと判断されます。";
-  }
-  if (action === "🟡 押し目待ち") {
-    return "高値圏を維持していますが過熱感はなく、押し目形成後のエントリーが有効です。";
-  }
-  return "出来高やトレンド条件が不足しており、優位性が低いため見送りが妥当です。";
-}
-
-// ------------------------------
-// メインAPI
-// ------------------------------
-app.post("/analyze", (req, res) => {
-  try {
-    const input = req.body.symbols || "";
-    const symbols = input
-      .split("\n")
-      .map(s => s.trim())
-      .filter(Boolean);
-
-    if (symbols.length === 0) {
-      return res.json({ results: [], message: "銘柄を入力してください。" });
+# ------------------------------
+# 仮データ取得（後でAPIに差し替え）
+# ------------------------------
+def fetch_stock_data(symbol):
+    return {
+        "symbol": symbol,
+        "name": f"銘柄{symbol}" if symbol.isdigit() else symbol,
+        "close": 1020,
+        "high52": 1050,
+        "volume": 200000,
+        "avg_volume": 100000,
+        "ma25": 980,
+        "ma75": 900,
+        "eps_growth": 35,
+        "sales_growth": 25,
+        "roe": 18
     }
 
-    const results = [];
+# ------------------------------
+# 判定ロジック
+# ------------------------------
+def is_52week_high(stock):
+    return stock["close"] >= stock["high52"] * 0.97
 
-    symbols.forEach(symbol => {
-      const stock = fetchStockData(symbol);
+def volume_ratio(stock):
+    return stock["volume"] / stock["avg_volume"]
 
-      // 必須条件
-      if (!is52WeekHigh(stock)) return;
-      if (stock.ma25 <= stock.ma75) return;
-      if (!isOverExtended(stock)) return;
+def is_overextended(stock):
+    return (stock["high52"] - stock["close"]) / stock["high52"] < 0.03
 
-      const score = calcScore(stock);
-      if (score < 85) return;
+# ------------------------------
+# スコア計算（厳しめ）
+# ------------------------------
+def calc_score(stock):
+    score = 0
 
-      const action = judgeAction(stock);
+    if is_52week_high(stock):
+        score += 30
+    if volume_ratio(stock) >= 1.5:
+        score += 20
+    if stock["ma25"] > stock["ma75"]:
+        score += 10
+    if stock["eps_growth"] >= 20:
+        score += 20
+    if stock["sales_growth"] >= 15:
+        score += 20
 
-      results.push({
-        symbol: stock.symbol,
-        name: stock.name,
-        score,
-        action,
-        reason: makeReason(stock, action)
-      });
-    });
+    return score
 
-    res.json({
-      count: results.length,
-      results
-    });
+# ------------------------------
+# 行動判定
+# ------------------------------
+def judge_action(stock):
+    vol = volume_ratio(stock)
 
-  } catch (e) {
-    res.status(500).json({ error: "分析中にエラーが発生しました。" });
-  }
-});
+    if vol >= 1.8 and is_overextended(stock):
+        return "🟢 即買い"
+    if 1.2 <= vol < 1.8:
+        return "🟡 押し目待ち"
+    return "⚪ 見送り"
 
-// ------------------------------
-// 起動
-// ------------------------------
-app.listen(3000, () => {
-  console.log("新高値ブレイク分析サーバー起動中 : http://localhost:3000");
-});
+# ------------------------------
+# 理由（日本語・端的）
+# ------------------------------
+def make_reason(stock, action):
+    if action == "🟢 即買い":
+        return "52週高値を出来高を伴って更新しており、初動のブレイクと判断されます。"
+    if action == "🟡 押し目待ち":
+        return "高値圏を維持していますが過熱感はなく、押し目形成待ちが有効です。"
+    return "条件が揃っておらず、優位性が低いため見送りが妥当です。"
+
+# ------------------------------
+# メインAPI
+# ------------------------------
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    try:
+        data = request.get_json()
+        input_text = data.get("symbols", "")
+
+        symbols = [s.strip() for s in input_text.split("\n") if s.strip()]
+
+        if not symbols:
+            return jsonify({"results": [], "message": "銘柄を入力してください。"})
+
+        results = []
+
+        for symbol in symbols:
+            stock = fetch_stock_data(symbol)
+
+            # 必須条件
+            if not is_52week_high(stock):
+                continue
+            if stock["ma25"] <= stock["ma75"]:
+                continue
+            if not is_overextended(stock):
+                continue
+
+            score = calc_score(stock)
+            if score < 85:
+                continue
+
+            action = judge_action(stock)
+
+            results.append({
+                "symbol": stock["symbol"],
+                "name": stock["name"],
+                "score": score,
+                "action": action,
+                "reason": make_reason(stock, action)
+            })
+
+        return jsonify({
+            "count": len(results),
+            "results": results
+        })
+
+    except Exception as e:
+        return jsonify({"error": "分析中にエラーが発生しました。"}), 500
+
+# ------------------------------
+# 起動
+# ------------------------------
+if __name__ == "__main__":
+    app.run(debug=True)
