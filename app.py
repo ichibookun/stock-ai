@@ -40,7 +40,7 @@ st.sidebar.title("🦅 Deep Dive Pro")
 mode = st.sidebar.radio(
     "モード選択", 
     ["🏠 市場ダッシュボード", "💎 お宝発掘 (一括採点)", "🔍 個別詳細分析"],
-    key="mode_selection_v12_4"
+    key="mode_selection_v12_5"
 )
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -50,39 +50,45 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 12.4: Model Auto-Survival")
+st.sidebar.info("Ver 12.5: Block 2.0/2.5")
 
-# --- AIモデル接続機能 (超強化版) ---
+# --- AIモデル接続機能 (修正版) ---
 def get_model_and_name(key):
     try:
         genai.configure(api_key=key)
-        # 1. 利用可能な全モデルを取得
-        all_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # 1. 全モデル取得
+        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
         if not all_models:
-            return None, "利用可能なモデルなし"
+            return None, "利用可能なモデルが見つかりません"
 
-        # 2. 優先順位リスト (上から順に探す)
-        # 1.5-flash (無料枠大) -> 1.5-pro (性能良) -> 2.0/2.5 (最新だが制限きつい) -> その他
-        priority_keywords = ["1.5-flash", "1.5-pro", "2.0-flash", "flash"]
+        # 2. 除外キーワード (制限がきつい最新版を避ける)
+        exclude = ["2.0", "2.5", "experimental", "exp"]
         
-        target_model = None
+        # 3. フィルタリングして「1.5-flash」を探す
+        # 安全なモデルのリスト
+        safe_models = [m for m in all_models if not any(ex in m for ex in exclude)]
         
-        for keyword in priority_keywords:
-            # キーワードを含むモデルを探す
-            found = next((m for m in all_models if keyword in m.name), None)
-            if found:
-                target_model = found
-                break
+        # その中から 1.5-flash を優先
+        target_name = next((m for m in safe_models if "1.5-flash" in m), None)
         
-        # 3. それでも無ければリストの先頭を使う
-        if not target_model:
-            target_model = all_models[0]
+        # なければ 1.5-pro
+        if not target_name:
+            target_name = next((m for m in safe_models if "1.5-pro" in m), None)
+            
+        # それでもなければ、安全リストの最初
+        if not target_name and safe_models:
+            target_name = safe_models[0]
+            
+        # 安全リストも空なら、元のリストの最初（仕方なく）
+        if not target_name and all_models:
+            target_name = all_models[0]
 
-        return genai.GenerativeModel(target_model.name), target_model.name
+        return genai.GenerativeModel(target_name), target_name
     except Exception as e:
         return None, str(e)
 
-# 接続テストと表示
+# 接続テスト表示
 if api_key:
     model, model_name = get_model_and_name(api_key)
     if model:
@@ -219,7 +225,7 @@ def get_news(code, name):
     return txt if txt else "直近の重要ニュースなし"
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 12.4)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 12.5)")
 
 # ==========================================
 # モード0: 🏠 市場ダッシュボード
@@ -337,7 +343,7 @@ elif mode == "🔍 個別詳細分析":
 
     if st.session_state['target_code']:
         code = st.session_state['target_code']
-        model, m_name = get_model_and_name(api_key) # ここで最適なモデル取得
+        model, m_name = get_model_and_name(api_key)
         now_str = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
         
         with st.spinner(f"コード【{code}】を分析中... (Model: {m_name})"):
