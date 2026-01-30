@@ -13,7 +13,7 @@ import os
 # --- ページ設定 ---
 st.set_page_config(page_title="Deep Dive Investing AI Pro", layout="wide")
 
-# --- JST設定 & 自動日付取得 ---
+# --- JST設定 ---
 JST = datetime.timezone(datetime.timedelta(hours=9))
 def get_current_time_jst(): return datetime.datetime.now(JST)
 
@@ -40,7 +40,7 @@ st.sidebar.title("🦅 Deep Dive Pro")
 mode = st.sidebar.radio(
     "モード選択", 
     ["🏠 市場ダッシュボード", "💎 お宝発掘 (一括採点)", "🔍 個別詳細分析"],
-    key="mode_selection_v13_2"
+    key="mode_selection_v14"
 )
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -50,7 +50,7 @@ else:
     api_key = st.sidebar.text_input("Gemini APIキー", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Ver 13.2: Smart Date Search")
+st.sidebar.info("Ver 14.0: Kabutan Direct")
 
 # --- AIモデル接続 (自動選択) ---
 def get_model_and_name(key):
@@ -64,7 +64,6 @@ def get_model_and_name(key):
         
         target = next((m for m in safe_models if "1.5-flash" in m), None)
         if not target: target = next((m for m in safe_models if "1.5-pro" in m), safe_models[0] if safe_models else all_models[0])
-        
         return genai.GenerativeModel(target), target
     except Exception as e: return None, str(e)
 
@@ -73,7 +72,6 @@ if api_key:
     if model: st.sidebar.caption(f"🤖 Connected: {m_name}")
     else: st.sidebar.error("接続エラー")
 
-# 個別設定
 if mode == "🔍 個別詳細分析":
     st.sidebar.subheader("🎨 チャート設定")
     show_bollinger = st.sidebar.checkbox("ボリンジャーバンド", value=True)
@@ -178,53 +176,51 @@ def calculate_technicals(hist):
         
     return hist, cross, kumo
 
-# --- ニュース取得機能（スマート検索版） ---
+# --- ニュース取得機能（株探特化版） ---
 def get_news(code, name):
     ddgs = DDGS()
     news_list = []
     
-    # 1. 自動で「今年の年号」を取得
+    # 今の日付
     now = get_current_time_jst()
-    this_year = now.year          # 例: 2026
-    last_year = this_year - 1     # 例: 2025 (念のため)
+    today_str = now.strftime('%Y-%m-%d')
     
-    # 2. 検索クエリの作成 (年号を自動挿入)
+    # 検索戦略: 株探や日経の「速報」を狙う
+    # あえて「2026」などの年号で縛りすぎず、サイトの最新順を信じる
     queries = [
-        # カブタンなどの速報サイトを優先
-        f"site:kabutan.jp {code} 決算 {this_year}",
-        f"site:nikkei.com {code} 業績 {this_year}",
-        # 一般検索でも年号を指定して古い記事を弾く
-        f"{code} {name} 決算短信 {this_year}年",
-        f"{code} {name} 業績修正 {this_year}年"
+        f"site:kabutan.jp {code} 決算",      # 株探の決算ページ直撃
+        f"site:kabutan.jp {code} 修正",      # 修正情報
+        f"site:nikkei.com {code} 決算",      # 日経
+        f"{code} {name} 決算短信 第3四半期",  # 時期指定
     ]
     
-    # 3. 検索実行
     for q in queries:
         try:
-            # max_resultsを増やして「最新」が埋もれないようにする
-            results = ddgs.text(q, region='jp-jp', timelimit='w', max_results=5)
+            # max_resultsを増やして、ノイズがあっても最新を拾える確率を上げる
+            results = ddgs.text(q, region='jp-jp', timelimit='d', max_results=5) # まず「1日以内」
+            if not results:
+                results = ddgs.text(q, region='jp-jp', timelimit='w', max_results=5) # なければ「1週間以内」
+            
             if results:
                 for r in results:
                     title = r.get('title', '')
                     body = r.get('body', '')
                     link = r.get('href', '')
                     
-                    # 重複排除
+                    # 株探の記事っぽさを判定 (タイトルにキーワードがあるか)
                     if not any(title in existing for existing in news_list):
-                        # ニュースリストに追加
-                        news_list.append(f"【{r.get('source','Web')}】{title}: {body[:80]}...")
+                        news_list.append(f"【{r.get('source','Web')}】{title}\n{body[:100]}...")
         except: pass
         time.sleep(0.3)
 
     if not news_list:
-        return "（直近の決算関連ニュースが検索で見つかりませんでした）", []
+        return "株探・日経などから直近の決算ニュースを取得できませんでした。", []
     
-    return "\n".join(news_list[:10]), news_list # リストも返す
+    return "\n\n".join(news_list[:12]), news_list # 多めに渡す
 
 # --- メイン UI ---
-st.title("🦅 Deep Dive Investing AI Pro (Ver 13.2)")
+st.title("🦅 Deep Dive Investing AI Pro (Ver 14.0)")
 
-# モード0: ダッシュボード
 if mode == "🏠 市場ダッシュボード":
     st.header("📈 Market Dashboard")
     c1, c2, c3 = st.columns(3)
@@ -248,7 +244,6 @@ if mode == "🏠 市場ダッシュボード":
                 if cc.button("Go", key=f"g_{i['c']}"): st.session_state['target_code']=i['c']; st.success("移動します")
     else: st.info("履歴なし")
 
-# モード1: スクリーニング
 elif mode == "💎 お宝発掘 (一括採点)":
     st.header("💎 お宝銘柄ハンター")
     def set_pre(c): st.session_state['screener_codes'] = c
@@ -281,7 +276,6 @@ elif mode == "💎 お宝発掘 (一括採点)":
             df = pd.DataFrame(res).sort_values(by=["成長","割安"], ascending=False)
             st.dataframe(df.style.apply(lambda s: ['background-color:#2e4a33' if v>=80 else '' for v in s], subset=["成長","割安"]), use_container_width=True)
 
-# モード2: 個別詳細 (スマート検索版)
 elif mode == "🔍 個別詳細分析":
     with st.form('find'):
         q = st.text_input("銘柄コード/名", placeholder="例: 6758")
@@ -306,7 +300,8 @@ elif mode == "🔍 個別詳細分析":
     if st.session_state['target_code']:
         code = st.session_state['target_code']
         model, m_name = get_model_and_name(api_key)
-        now = get_current_time_jst().strftime("%Y-%m-%d %H:%M")
+        now = get_current_time_jst()
+        now_str = now.strftime("%Y年%m月%d日 %H:%M")
         
         with st.spinner(f"分析中... {code}"):
             try:
@@ -321,8 +316,8 @@ elif mode == "🔍 個別詳細分析":
                 st.sidebar.write(f"業種: {safe_get(inf,['sector'],'-')}")
                 if safe_get(inf,['website']): st.sidebar.link_button("公式HP", inf['website'])
                 
-                # ニュース取得 (年号自動挿入 & リスト取得)
-                news_text, raw_news_list = get_news(code, inf.get('longName', code))
+                # ニュース取得
+                news_text, raw_news = get_news(code, inf.get('longName', code))
                 
                 st.header(f"{inf.get('longName', code)} ({code})")
                 
@@ -335,33 +330,38 @@ elif mode == "🔍 個別詳細分析":
                     c3.metric("成長スコア", f"{oneil}")
                     c4.metric("割安スコア", f"{graham}")
                     
-                    st.subheader("📰 決算・重要ニュース分析")
+                    st.subheader("📰 決算・重要ニュース")
                     
-                    # ユーザーに「何が見つかったか」を見せる (デバッグ用にもなる)
-                    with st.expander("🔍 AIが取得したニュース一覧 (クリックで展開)"):
-                        if raw_news_list:
-                            for n in raw_news_list:
-                                st.caption(n)
-                        else:
-                            st.warning("直近のニュースが見つかりませんでした。")
+                    # ニュースの「生データ」を見れるようにする（証拠確認用）
+                    with st.expander("🔍 取得したニュース一覧 (クリックで確認)", expanded=False):
+                        if raw_news:
+                            for n in raw_news: st.text(n)
+                        else: st.warning("ニュースが見つかりませんでした")
 
                     if model:
                         prompt = f"""
-                        あなたは日本株のプロです。現在日時: {now}
+                        あなたは日本株のプロ機関投資家です。
+                        現在日時: {now_str}
                         
-                        対象: {inf.get('longName')} ({code})
+                        対象銘柄: {inf.get('longName')} ({code})
                         
-                        【取得した最新ニュース】
+                        【検索で取得したニュース】
                         {news_text}
                         
-                        【厳守事項】
-                        1. **ニュースの日付を厳しくチェックせよ**。記事に「2024年」や「1年前」の記述がある場合、それは「過去のニュース」として扱い、決して「最新決算」として解説しないこと。
-                        2. もしニュースリストに「2026年」や「直近数日」の記事が無ければ、「最新の決算情報は検索で見つかりませんでした」と正直に答えること。嘘をつかないこと。
+                        【重要指示】
+                        1. **日付の確認**: ニュース内の日付（「22分前」「本日」「1月30日」など）を現在日時と比較し、**直近3日以内**の情報を最優先せよ。
+                        2. **決算分析**: 直近の決算発表（第3四半期など）があれば、その数値（売上・利益・進捗率）と市場の期待値を比較して評価せよ。
+                        3. **注意**: もしニュースリストに「2024年」などの古い日付しかなければ、「直近の速報は見当たりません」と正直に述べよ。決して古い情報を最新として扱わないこと。
                         
-                        指示:
-                        1. **最新決算**: ニュースに基づき、今期の業績（増益・減益など）を解説。
-                        2. **市場反応**: 株価への影響予測。
-                        3. **売買判断**: スコア(成長{oneil}/割安{graham})とテクニカル({cross}/{kumo})に基づく助言。
+                        出力形式:
+                        ### ⚡ 決算速報・最新ニュース
+                        (ここに詳細)
+                        
+                        ### 🔮 市場の反応と予測
+                        (ここに分析)
+                        
+                        ### 🛡️ 売買戦略 (テクニカル: {cross}, {kumo})
+                        (ここに結論)
                         """
                         try:
                             resp = model.generate_content(prompt)
