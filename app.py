@@ -6,19 +6,22 @@ import time
 # ==============================
 # 設定
 # ==============================
-st.set_page_config(page_title="新高値ブレイク分析（スコア順）", layout="wide")
+st.set_page_config(page_title="新高値ブレイク分析（高値掴み防止版）", layout="wide")
 
 # ==============================
-# 日本語銘柄名マッピング (維持)
+# 日本語銘柄名マッピング (スクショの銘柄を追加)
 # ==============================
 JP_NAME_MAP = {
-    # ユーザー提供銘柄
+    # ユーザー指摘 & スクショ銘柄
     "4502": "武田薬品", "6370": "栗田工業", "6952": "カシオ計算機",
     "4519": "中外製薬", "5020": "ENEOS", "5021": "コスモエネルギー",
     "5834": "SBIリーシング", "6337": "テセック", "6490": "日本ピラー",
     "6787": "メイコー", "7022": "サノヤスHD", "4410": "ハリマ化成",
-    "4507": "塩野義製薬",
-    # その他主要
+    "4507": "塩野義製薬", 
+    "5204": "石塚硝子", "5252": "日本ナレッジ", "6858": "小野測器",
+    "6998": "日本タングステン", "5984": "兼房", "6349": "小森コーポ",
+    "5019": "出光興産", "8053": "住友商事", "2768": "双日",
+    # 主要銘柄
     "7203": "トヨタ自動車", "6758": "ソニーG", "9984": "ソフトバンクG",
     "8035": "東京エレク", "6501": "日立製作所", "6702": "富士通",
     "6861": "キーエンス", "6098": "リクルート", "4063": "信越化学",
@@ -31,7 +34,7 @@ JP_NAME_MAP = {
 }
 
 # ==============================
-# データ取得関数
+# データ取得
 # ==============================
 @st.cache_data(ttl=3600)
 def fetch_stock_data(symbol):
@@ -43,34 +46,35 @@ def fetch_stock_data(symbol):
         if hist is None or hist.empty or len(hist) < 60:
             return None
 
-        # --- テクニカル指標 ---
+        # 値取得
         close = float(hist["Close"].iloc[-1])
         volume = int(hist["Volume"].iloc[-1])
         
-        # 52週高値
+        # 52週高値 (直前まで)
         window = min(252, len(hist))
         prev_high52 = hist["High"].iloc[-(window + 1):-1].max()
 
         ma25 = float(hist["Close"].rolling(25).mean().iloc[-1])
-        ma75 = float(hist["Close"].rolling(75).mean().iloc[-1])
         avg_volume = float(hist["Volume"].rolling(20).mean().iloc[-1])
 
-        # ブレイク判定 (当日)
+        # --- 判定ロジック ---
         broke_today = close > prev_high52
         
-        # 直近ブレイク & 押し目計算 (過去5日)
+        # ブレイクからの乖離率 (5%ルール用)
+        # (今日の終値 - ブレイクライン) / ブレイクライン
+        breakout_divergence = (close - prev_high52) / prev_high52 if prev_high52 > 0 else 0
+
+        # 直近ブレイク & 押し目
         recent_window = min(5, len(hist)-1)
         recent_closes = hist["Close"].iloc[-(recent_window+1):-1]
         broke_recent = False
         pullback_pct = 0.0
         
         if recent_window > 0:
-            # 過去5日以内に高値更新があったか
             broke_indices = recent_closes[recent_closes > prev_high52].index
             if len(broke_indices) > 0:
                 broke_recent = True
                 last_idx = broke_indices[-1]
-                # ブレイク後の最高値を探索
                 start = hist.index.get_loc(last_idx)
                 max_val = hist["Close"].iloc[start:-1].max()
                 if max_val > 0:
@@ -83,13 +87,12 @@ def fetch_stock_data(symbol):
             price_3m_ago = hist["Close"].iloc[-(period_3m+1)]
             momentum_3m = (close - price_3m_ago) / price_3m_ago
 
-        # --- 企業情報 ---
+        # 企業情報
         try:
             info = tk.info or {}
             earnings_q_growth = info.get("earningsQuarterlyGrowth")
             trailing_eps = info.get("trailingEps")
             forward_eps = info.get("forwardEps")
-            
             if code in JP_NAME_MAP:
                 name = JP_NAME_MAP[code]
             else:
@@ -103,7 +106,8 @@ def fetch_stock_data(symbol):
             "symbol": code, "name": name, "close": close,
             "volume": volume, "avg_volume": avg_volume,
             "prev_high52": float(prev_high52),
-            "ma25": ma25, "ma75": ma75,
+            "breakout_divergence": breakout_divergence,
+            "ma25": ma25,
             "broke_today": broke_today,
             "broke_recent": broke_recent,
             "pullback_pct": float(pullback_pct),
@@ -116,18 +120,14 @@ def fetch_stock_data(symbol):
         return None
 
 # ==============================
-# スコア計算ロジック
+# スコア & 判定
 # ==============================
 
-# 1. 総合スコア (売買判断用: テクニカル重視)
 def calc_total_score(stock):
     score = 0
-    
     # A. 52週高値ブレイク (40点)
-    if stock["broke_today"]:
-        score += 40
-    elif stock["broke_recent"]: # 直近でブレイク済みなら30点
-        score += 30
+    if stock["broke_today"]: score += 40
+    elif stock["broke_recent"]: score += 30
         
     # B. 出来高急増 (30点)
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
@@ -136,77 +136,81 @@ def calc_total_score(stock):
     elif vr >= 1.2: score += 10
     
     # C. トレンド (20点)
-    if stock["ma25"] > stock["ma75"]:
-        score += 20
+    if stock["close"] > stock["ma25"]: score += 20
         
     # D. モメンタム (10点)
-    if stock["momentum_3m"] >= 0.15:
-        score += 10
+    if stock["momentum_3m"] >= 0.15: score += 10
         
     return score
 
-# 2. CANSLIMスコア (ファンダメンタルズ参考用)
 def calc_canslim(stock):
     score = 0
-    # C: 四半期成長
     eg = stock.get("earnings_q_growth")
     if eg and eg >= 0.20: score += 30
-    # A: 年間成長期待
     te = stock.get("trailing_eps"); fe = stock.get("forward_eps")
     if te and fe and te != 0:
         if (fe - te) / abs(te) >= 0.15: score += 30
-    # N: 新高値
     if stock["broke_today"] or stock["broke_recent"]: score += 20
-    # S: 出来高
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
     if vr >= 1.5: score += 10
-    # L: モメンタム
     if stock["momentum_3m"] >= 0.15: score += 10
-    
     return score
 
-# ==============================
-# 判定ロジック (スコアに基づくランク付け)
-# ==============================
+# --- 判定ロジック (改良版) ---
 def judge_action(stock, total_score):
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
     
-    # 🟢 即買い: 総合スコアが高く、当日ブレイク & 出来高伴う
-    if total_score >= 80 and stock["broke_today"] and vr >= 1.2:
-        return "🟢 即買い"
-    
-    # 🟡 押し目待ち: 総合スコアそこそこで、最近ブレイク & 浅い調整中
-    # 条件: 直近ブレイク済み AND (現在2%〜8%の押し目 OR 当日ブレイクだが出来高不足)
+    # 1. 当日ブレイクの判定
+    if stock["broke_today"]:
+        # 【重要】ブレイクラインから5%以上離れていたら「過熱」とする
+        if stock["breakout_divergence"] > 0.05:
+            return "📈 急騰 (過熱)"
+        
+        # 正常なブレイク範囲内なら即買い
+        if total_score >= 80 and vr >= 1.2:
+            return "🟢 即買い"
+        
+        return "⚪ ブレイク(力不足)"
+
+    # 2. 押し目待ちの判定
     if stock["broke_recent"]:
         pb = stock["pullback_pct"]
-        if 0.02 <= pb <= 0.08 and total_score >= 60:
+        # 2%〜10%の押し目ならチャンス
+        if 0.02 <= pb <= 0.10 and total_score >= 60:
             return "🟡 押し目待ち"
-            
-    # 当日ブレイクだが出来高が足りない場合も押し目候補とする
-    if stock["broke_today"] and total_score >= 60:
-        return "🟡 押し目待ち"
             
     return "⚪ 監視中"
 
-# 理由作成
 def make_reason(stock):
     reasons = []
-    if stock["broke_today"]: reasons.append("本日高値更新")
-    if stock["broke_recent"]: reasons.append("直近高値更新")
+    if stock["broke_today"]:
+        div = stock["breakout_divergence"] * 100
+        if div > 5:
+            reasons.append(f"高値更新(+{div:.1f}%乖離中)")
+        else:
+            reasons.append("本日高値更新")
+            
+    if stock["broke_recent"]:
+        reasons.append("直近更新")
     
     pb = stock["pullback_pct"]
-    if 0.02 <= pb <= 0.08: reasons.append(f"押し目-{pb*100:.1f}%")
+    if 0.02 <= pb <= 0.10:
+        reasons.append(f"押し目(-{pb*100:.1f}%)")
     
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
-    if vr >= 1.5: reasons.append(f"出来高{vr:.1f}倍")
-    
+    if vr >= 1.5:
+        reasons.append(f"出来高増({vr:.1f}倍)")
+        
     return " / ".join(reasons) if reasons else "-"
 
 # ==============================
-# メイン画面
+# UI
 # ==============================
-st.title("📈 新高値ブレイク分析 (Ver 21.0)")
-st.caption("総合スコア順 / CANSLIM併記 / 日本語対応")
+st.title("📈 新高値ブレイク分析 (Ver 22.0)")
+st.info("💡 **即買い vs 押し目待ち の違い**\n\n"
+        "**🟢 即買い**: 本日52週高値を更新し、かつ「過熱しすぎていない（乖離+5%以内）」銘柄。まさに飛び乗るタイミング。\n\n"
+        "**📈 急騰 (過熱)**: 本日高値を更新したが、+5%以上急騰してしまった銘柄。今買うと「高値掴み」のリスク大。監視リストに入れて、下がるのを待ちましょう。\n\n"
+        "**🟡 押し目待ち**: 数日前に高値を更新し、今は利益確定売りなどで少し下がっている(-2%〜-10%)状態。再上昇を狙う安全なエントリーポイント。")
 
 # デフォルト銘柄
 default_codes = """4502
@@ -221,7 +225,13 @@ default_codes = """4502
 6787
 7022
 4410
-4507"""
+4507
+5204
+5252
+6858
+6998
+5984
+6349"""
 
 input_text = st.text_area("銘柄コード (改行区切り)", value=default_codes, height=200)
 
@@ -239,22 +249,22 @@ if st.button("🚀 分析開始", type="primary"):
             data = fetch_stock_data(sym)
             
             if data:
-                # 計算
-                total_score = calc_total_score(data) # 総合スコア(復活)
-                canslim = calc_canslim(data)         # CANSLIM
-                action = judge_action(data, total_score) # 判定
+                t_score = calc_total_score(data)
+                c_score = calc_canslim(data)
+                action = judge_action(data, t_score)
                 reason = make_reason(data)
                 
-                # 株探リンク
                 url = f"https://kabutan.jp/stock/?code={data['symbol']}"
                 link = f'<a href="{url}" target="_blank" style="text-decoration:none;font-weight:bold;color:#1E90FF;">株探</a>'
                 
-                # 判定の色付け
+                # 色分け
                 judge_html = action
                 if "即買い" in action:
                     judge_html = f'<span style="color:green;font-weight:bold;">{action}</span>'
                 elif "押し目" in action:
                     judge_html = f'<span style="color:#DAA520;font-weight:bold;">{action}</span>'
+                elif "急騰" in action:
+                    judge_html = f'<span style="color:red;font-weight:bold;">{action}</span>'
 
                 rows.append({
                     "Check": link,
@@ -262,8 +272,8 @@ if st.button("🚀 分析開始", type="primary"):
                     "Name": data['name'],
                     "Price": f"{data['close']:,.0f}",
                     "Judge": judge_html,
-                    "Total Score": total_score, # 総合スコア
-                    "CANSLIM": canslim,         # 横に配置
+                    "Total Score": t_score,
+                    "CANSLIM": c_score,
                     "Reason": reason,
                     "Vol Ratio": f"{data['volume']/data['avg_volume']:.1f}x" if data['avg_volume']>0 else "-"
                 })
@@ -272,11 +282,10 @@ if st.button("🚀 分析開始", type="primary"):
         
         if rows:
             df = pd.DataFrame(rows)
-            # 並び替え: 総合スコア(降順)
+            # ソート順: 総合スコアが高い順
             df = df.sort_values("Total Score", ascending=False)
             
             st.success(f"{len(df)} 銘柄の分析完了")
-            # HTML表示
             st.write(df.to_html(escape=False, index=False), unsafe_allow_html=True)
         else:
             st.error("データなし")
