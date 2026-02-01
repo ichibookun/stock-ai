@@ -6,13 +6,13 @@ import time
 # ==============================
 # 設定
 # ==============================
-st.set_page_config(page_title="新高値ブレイク分析（オニール流・チャート直結版）", layout="wide")
+st.set_page_config(page_title="新高値ブレイク分析（オニール流・修正版）", layout="wide")
 
 # ==============================
-# 日本語銘柄名辞書 (維持・完全版)
+# 日本語銘柄名辞書
 # ==============================
 JP_NAME_MAP = {
-    # --- ユーザー提供リスト (日経225/JPX400/主要銘柄) ---
+    # 主要銘柄・ユーザーリスト（省略せず全て含めます）
     "1332": "ニッスイ", "1605": "INPEX", "1721": "コムシスHD", "1801": "大成建設",
     "1802": "大林組", "1803": "清水建設", "1808": "長谷工", "1812": "鹿島",
     "1925": "大和ハウス", "1928": "積水ハウス", "1963": "日揮HD", "2002": "日清製粉G",
@@ -70,7 +70,6 @@ JP_NAME_MAP = {
     "9503": "関西電", "9531": "東ガス", "9532": "大ガス", "9602": "東宝",
     "9735": "セコム", "9766": "コナミG", "9843": "ニトリHD", "9983": "ファストリ",
     "9984": "ソフトバンクG",
-    # --- スクリーンショット等の個別追加 ---
     "5021": "コスモエネ", "5834": "SBIリーシング", "6337": "テセック", 
     "6490": "日本ピラー", "6787": "メイコー", "7022": "サノヤスHD", 
     "4410": "ハリマ化成", "5204": "石塚硝子", "5252": "日本ナレッジ", 
@@ -127,7 +126,11 @@ def fetch_stock_data(symbol):
                 last_idx = broke_indices[-1]
                 # ブレイク後の最高値を探す
                 start = hist.index.get_loc(last_idx)
-                max_val = hist["Close"].iloc[start:-1].max()
+                
+                # 【修正】昨日ブレイクした場合も計算できるようスライスを調整
+                # (以前は [start:-1] だったので昨日ブレイクだと空になっていた)
+                max_val = hist["Close"].iloc[start:].max()
+                
                 if max_val > 0:
                     pullback_pct = (max_val - close) / max_val
 
@@ -145,7 +148,6 @@ def fetch_stock_data(symbol):
             trailing_eps = info.get("trailingEps")
             forward_eps = info.get("forwardEps")
             
-            # 辞書優先
             if code in JP_NAME_MAP:
                 name = JP_NAME_MAP[code]
             else:
@@ -173,7 +175,7 @@ def fetch_stock_data(symbol):
         return None
 
 # ==============================
-# スコア計算 (鬼のオニール基準)
+# スコア計算
 # ==============================
 
 def calc_total_score(stock):
@@ -182,13 +184,12 @@ def calc_total_score(stock):
     if stock["broke_today"]: score += 40
     elif stock["broke_recent"]: score += 30
         
-    # B. 出来高 (30点) - 基準厳格化
+    # B. 出来高 (30点)
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
     if vr >= 2.0: score += 30
     elif vr >= 1.5: score += 20
-    # 1.5倍未満は加点なし
     
-    # C. トレンド (20点) - 25日線 > 75日線 (上昇トレンド中)
+    # C. トレンド (20点) - パーフェクトオーダー傾向
     if stock["ma25"] > stock["ma75"]:
         score += 20
     
@@ -200,29 +201,24 @@ def calc_total_score(stock):
 
 def get_canslim_details(stock):
     details = []
-    # C: 四半期成長 >= 20%
     eg = stock.get("earnings_q_growth")
     if eg and eg >= 0.20: details.append("C")
     
-    # A: 年間成長期待 >= 15%
     te = stock.get("trailing_eps"); fe = stock.get("forward_eps")
     if te and fe and te != 0:
         if (fe - te) / abs(te) >= 0.15: details.append("A")
         
-    # N: 新高値
     if stock["broke_today"] or stock["broke_recent"]: details.append("N")
     
-    # S: 出来高 >= 1.5倍
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
     if vr >= 1.5: details.append("S")
     
-    # L: モメンタム
     if stock["momentum_3m"] >= 0.15: details.append("L")
     
     return "-".join(details) if details else "-"
 
 # ==============================
-# 判定ロジック (厳格化 & 押し目条件)
+# 判定ロジック (バグ修正＆微調整)
 # ==============================
 def judge_action(stock, total_score):
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
@@ -231,16 +227,15 @@ def judge_action(stock, total_score):
     if stock["broke_today"] and stock["breakout_divergence"] > 0.05:
         return "📈 急騰 (過熱)"
 
-    # 2. 即買い (厳格化: スコア90以上 & 出来高2.0倍 & 乖離5%未満)
+    # 2. 即買い (厳格化: スコア90以上 & 出来高2倍)
     if stock["broke_today"] and total_score >= 90 and vr >= 2.0:
         return "🟢 即買い"
 
-    # 3. 押し目待ち (条件: 3%~7%調整 & 現在25日線の上にあること)
+    # 3. 押し目待ち (条件: 2.5% ~ 7.5% 調整 & 25日線キープ)
+    # ※計算誤差などを考慮し、3-7%に対してわずかにバッファを持たせました
     if stock["broke_recent"]:
         pb = stock["pullback_pct"]
-        # オニール流の健全な調整幅
-        if 0.03 <= pb <= 0.07:
-            # トレンドが崩れていないこと (終値 > 25MA)
+        if 0.025 <= pb <= 0.075:
             if stock["close"] > stock["ma25"]:
                 return "🟡 押し目待ち"
             
@@ -261,11 +256,12 @@ def make_reason(stock):
         reasons.append("直近更新")
     
     pb = stock["pullback_pct"]
-    if 0.03 <= pb <= 0.07:
-        if stock["close"] > stock["ma25"]:
-            reasons.append(f"健全な押し(-{pb*100:.1f}%)")
-        else:
-            reasons.append(f"25日線割れ(注意)")
+    # 押し目率を常に表示して、なぜ対象外か分かるようにする
+    if pb > 0:
+        push_text = f"押し目-{pb*100:.1f}%"
+        if stock["close"] < stock["ma25"]:
+            push_text += "(25日線割れ)"
+        reasons.append(push_text)
     
     vr = stock["volume"] / stock["avg_volume"] if stock["avg_volume"] > 0 else 0
     if vr >= 2.0: reasons.append(f"出来高{vr:.1f}倍(強)")
@@ -276,13 +272,13 @@ def make_reason(stock):
 # ==============================
 # UI
 # ==============================
-st.title("📈 新高値ブレイク分析 (Ver 26.0)")
-st.caption("オニール流厳格基準 / チャート直結リンク / 日本語完全版")
+st.title("📈 新高値ブレイク分析 (Ver 26.1)")
+st.caption("オニール流厳格基準 / 計算ロジック修正済")
 
 st.markdown("""
-- **🟢 即買い**: スコア90点以上、出来高2倍以上、本日高値更新(乖離5%未満)
-- **🟡 押し目**: 直近高値更新、下落幅3~7%、かつ25日線の上を維持
-- **📈 急騰**: ブレイクラインから5%以上乖離（高値掴み注意）
+- **🟢 即買い**: スコア90点以上、出来高2倍以上、本日高値更新(乖離+5%以内)
+- **🟡 押し目**: 直近高値更新、下落幅2.5~7.5%、かつ25日線の上を維持
+- **📈 急騰**: ブレイクラインから+5%以上乖離（高値掴み注意）
 """)
 
 default_codes = """4502
@@ -324,7 +320,7 @@ if st.button("🚀 分析開始", type="primary"):
                 canslim_str = get_canslim_details(data)
                 reason = make_reason(data)
                 
-                # チャート直リンクに変更
+                # チャート直リンク
                 url = f"https://kabutan.jp/stock/chart?code={data['symbol']}"
                 link = f'<a href="{url}" target="_blank" style="text-decoration:none;font-weight:bold;color:#1E90FF;">チャート</a>'
                 
